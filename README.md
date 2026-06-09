@@ -1,0 +1,902 @@
+# kiroAds SDK
+
+`kiroAds` is a unified Android Library (SDK) designed to simplify the integration of **Ads (AdMob)**, **Tracking (Firebase Analytics)**, and **In-App Purchases (Google Play Billing)** into your Android applications with minimal code configuration.
+
+---
+
+## Getting Started
+
+Follow these steps to integrate the library using JitPack:
+
+### Step 1: Add the JitPack repository
+Add the JitPack repository to your root `settings.gradle.kts` file:
+
+```kotlin
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") } // <-- Add this line
+    }
+}
+```
+
+### Step 2: Add the dependency
+Add the dependency to your app-level `build.gradle.kts` file:
+
+```kotlin
+dependencies {
+    implementation("com.github.kirozxy.kiroAds:kirosdk:LATEST_VERSION")
+}
+```
+
+### Step 3: Setup Facebook Credentials (If using Facebook Analytics)
+Meta (Facebook) SDK requires your Facebook App ID and Client Token to be declared in your app's manifest and string resources for background initialization.
+
+1. Add your credentials to your app-level `res/values/strings.xml`:
+```xml
+<resources>
+    <string name="facebook_app_id">YOUR_FACEBOOK_APP_ID</string>
+    <string name="facebook_client_token">YOUR_FACEBOOK_CLIENT_TOKEN</string>
+</resources>
+```
+
+2. Add metadata tags inside the `<application>` element in your app-level `AndroidManifest.xml`:
+```xml
+<application>
+    <meta-data 
+        android:name="com.facebook.sdk.ApplicationId" 
+        android:value="@string/facebook_app_id"/>
+    <meta-data 
+        android:name="com.facebook.sdk.ClientToken" 
+        android:value="@string/facebook_client_token"/>
+</application>
+```
+
+### Step 4: Configure your AdMob Application ID (Required for Ads)
+The Google Mobile Ads SDK **requires** your AdMob App ID to be declared in your app's `AndroidManifest.xml`. **If you skip this step, your app will crash on launch.**
+
+Add the following `meta-data` tag inside the `<application>` element of your app-level `AndroidManifest.xml`:
+```xml
+<application>
+    <meta-data
+        android:name="com.google.android.gms.ads.APPLICATION_ID"
+        android:value="ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY"/> <!-- Your real AdMob App ID -->
+</application>
+```
+
+> [!NOTE]
+> The App ID (`~`) is different from an Ad Unit ID (`/`). You can use Google's sample App ID `ca-app-pub-3940256099942544~3347511713` for local testing.
+
+---
+
+## 🛠️ Usage Instructions
+
+### 1. SDK Initialization
+Initialize `KiroSdk` once inside your `Application` class:
+
+```kotlin
+package com.your.app
+
+import android.app.Application
+import com.kiro.sdk.KiroSdk
+import com.kiro.sdk.ads.KiroAds
+import com.kiro.sdk.tracking.KiroTracker
+import com.kiro.sdk.billing.KiroBilling
+
+class MyApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+
+        // Initialize the SDK
+        KiroSdk.init(
+            context = this,
+            config = KiroSdk.SdkConfig(
+                isDebug = true, // Set to false when compiling for production
+                enableAds = true,
+                adConfig = KiroAds.Config(
+                    // Register your physical/emulator device IDs here so that test ads
+                    // are served during development (prevents AdMob policy violations).
+                    // Find your device ID in Logcat after the first ad request.
+                    testDeviceIds = listOf("YOUR_TEST_DEVICE_ID")
+                ),
+                trackingConfig = KiroTracker.Config(
+                    enableFirebase = true,
+                    appsFlyerDevKey = "YOUR_APPSFLYER_DEV_KEY", // Provide dev key to enable AppsFlyer
+                    enableFacebook = true // Set to true to enable Facebook AppEvents
+                ),
+                billingConfig = KiroBilling.Config(
+                    enableBilling = true,
+                    // Declare your premium/remove-ads product/subscription IDs to restore state automatically (even after clearing data)
+                    removeAdsProductIds = listOf("remove_ads_forever", "remove_ads_monthly")
+                )
+            )
+        )
+    }
+}
+```
+
+> [!NOTE]
+> **About Mobile Ads initialization:** `KiroSdk.init()` only initializes the Google Mobile Ads engine when ads are enabled, not disabled by purchase, **and** UMP consent already allows ad requests. If consent has not been gathered yet, initialization is automatically deferred and triggered for you once `gatherConsent()` completes (see the next section). You do not need to call `MobileAds.initialize()` yourself.
+
+### 2. EU User Consent (GDPR Compliance)
+
+If your app targets users in the European Union (EU) or European Economic Area (EEA), you must comply with the GDPR and Google's EU User Consent Policy. 
+
+`KiroSdk` includes a built-in `consent` manager (`KiroConsentManager`) wrapping Google's User Messaging Platform (UMP) SDK.
+
+#### Gather Consent on App Launch
+Call `gatherConsent` in your launcher activity's `onCreate` before loading or requesting ads:
+
+```kotlin
+import com.kiro.sdk.KiroSdk
+import kotlinx.coroutines.launch
+
+class MainActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        // 1. Gather consent from EU users
+        KiroSdk.consent.gatherConsent(activity = this) { error ->
+            if (error != null) {
+                Log.w("MyApp", "Consent gathering failed: ${error.message}")
+            }
+            
+            // 2. Check if we can request ads after the flow completes
+            if (KiroSdk.consent.canRequestAds(context = this)) {
+                // Preload your ads safely
+                lifecycleScope.launch {
+                    KiroSdk.ads.loadInterstitial(context = this@MainActivity, "YOUR_AD_UNIT_ID")
+                }
+            }
+        }
+    }
+}
+```
+
+#### Best Practice: Splash Screen Integration (Consent + loadAndShow Flow)
+In a typical production application, you should handle consent gathering on your **Splash Screen**, then load and display a Splash Interstitial Ad immediately before navigating to the main screen:
+
+```kotlin
+import android.content.Intent
+import android.os.Bundle
+import android.util.Log
+import androidx.appcompat.app.AppCompatActivity
+import com.kiro.sdk.KiroSdk
+
+class SplashActivity : AppCompatActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_splash)
+
+        // 1. First gather consent from the user
+        KiroSdk.consent.gatherConsent(activity = this) { error ->
+            if (error != null) {
+                Log.w("SplashActivity", "Consent request failed: ${error.message}")
+            }
+
+            // 2. Check if we are allowed to request ads under GDPR rules
+            if (KiroSdk.consent.canRequestAds(context = this)) {
+                // 3. Load & show splash interstitial immediately
+                KiroSdk.ads.loadAndShowInterstitial2F(
+                    activity = this,
+                    highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID",
+                    lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID",
+                    onAdDismissed = {
+                        // Move to Main screen when ad is closed
+                        navigateToMain()
+                    }
+                )
+            } else {
+                // GDPR rules do not allow ads (e.g. user rejected consent), skip ad
+                navigateToMain()
+            }
+        }
+    }
+
+    private fun navigateToMain() {
+        startActivity(Intent(this, MainActivity::class.java))
+        finish()
+    }
+}
+```
+
+#### Show Privacy Settings Option
+Google requires providing a way for users to change or revoke their consent choices at any time.
+
+Check if privacy options are required (i.e. user is in EEA) and show a button in your settings screen:
+```kotlin
+if (KiroSdk.consent.isPrivacyOptionsRequired(context = this)) {
+    btnPrivacySettings.visibility = View.VISIBLE
+    btnPrivacySettings.setOnClickListener {
+        KiroSdk.consent.showPrivacyOptionsForm(activity = this) { error ->
+            // Flow completed (choices updated)
+        }
+    }
+} else {
+    btnPrivacySettings.visibility = View.GONE
+}
+```
+
+#### Testing the Consent Form (Debug Only)
+Outside the EU/EEA you normally won't see the GDPR form. To preview and re-trigger it during development, pass your test device's hashed ID and force the EEA geography:
+
+```kotlin
+KiroSdk.consent.gatherConsent(
+    activity = this,
+    testDeviceHashedIds = listOf("YOUR_TEST_DEVICE_HASHED_ID"),
+    forceEeaForTesting = true // Behaves as if the device is in the EEA
+) { error ->
+    // Consent flow finished
+}
+```
+
+Find your hashed device ID in Logcat after running `gatherConsent()` once (the UMP SDK logs it). To make the form appear again on the next run, reset the stored consent state:
+
+```kotlin
+// Debug only — never ship this call in production
+KiroSdk.consent.resetConsent(context = this)
+```
+
+> [!WARNING]
+> `testDeviceHashedIds`, `forceEeaForTesting`, and `resetConsent()` are for development/QA only. Remove them (or guard with `BuildConfig.DEBUG`) before shipping to production.
+
+---
+
+### 3. Using Ads
+
+#### 💡 Best Practice: Managing Ad Unit IDs
+
+To avoid typos and make your code easy to maintain, it is highly recommended to manage all Ad Unit IDs in a single Kotlin `object`. This structure also lets you easily switch between Google Test IDs (during local debugging) and Real Production IDs automatically:
+
+```kotlin
+package com.your.app.config
+
+import com.your.app.BuildConfig
+
+object AdUnitIds {
+    // True during debug builds, false in production release builds
+    private val isDebug = BuildConfig.DEBUG
+
+    val BANNER_HOME = if (isDebug) {
+        "ca-app-pub-3940256099942544/6300978111" // Google Test Banner ID
+    } else {
+        "ca-app-pub-XXXXXXXXXXXXXXXX/YYYYYYYYYY" // Real Production ID
+    }
+
+    val INTER_SPLASH_HIGH = if (isDebug) {
+        "ca-app-pub-3940256099942544/1033173712" // Google Test Interstitial ID
+    } else {
+        "ca-app-pub-XXXXXXXXXXXXXXXX/YYYYYYYYYY" // Real Production ID
+    }
+
+    val NATIVE_DETAILS = if (isDebug) {
+        "ca-app-pub-3940256099942544/2247696110" // Google Test Native ID
+    } else {
+        "ca-app-pub-XXXXXXXXXXXXXXXX/YYYYYYYYYY" // Real Production ID
+    }
+}
+```
+
+Now, instead of hardcoding raw strings, you can use:
+```kotlin
+KiroSdk.ads.loadInterstitial(context, AdUnitIds.INTER_SPLASH_HIGH)
+```
+
+---
+
+#### Displaying a Banner Ad
+
+##### Option A: For XML layouts (View-based)
+Attach the Banner Ad directly to a container (e.g., a `FrameLayout`):
+
+```kotlin
+import com.kiro.sdk.KiroSdk
+import com.google.android.gms.ads.AdSize
+
+// Inside your Activity (Using View Binding)
+val adContainer = binding.adContainer
+KiroSdk.ads.showBanner(
+    activity = this,
+    container = adContainer,
+    adUnitId = "ca-app-pub-3940256099942544/6300978111", // Google's test banner ad unit ID
+    adSize = AdSize.BANNER
+)
+```
+
+##### Option B: For Jetpack Compose
+Render the banner using the Composable function provided by the SDK:
+
+```kotlin
+import com.kiro.sdk.ads.KiroBannerAd
+import com.google.android.gms.ads.AdSize
+
+@Composable
+fun MyScreen() {
+    Column {
+        // Your UI content...
+        
+        // Show Banner Ad at the bottom of the page
+        KiroBannerAd(
+            adUnitId = "ca-app-pub-3940256099942544/6300978111", // Google's test banner ID
+            adSize = AdSize.BANNER
+        )
+    }
+}
+```
+
+#### Using Interstitial Ads
+
+##### Option A: Manual preloading & displaying (Standard)
+Preload the ad asynchronously using Kotlin coroutines and display it when ready:
+```kotlin
+import kotlinx.coroutines.launch
+
+// 1. Preload the Interstitial Ad in a Coroutine Scope.
+// Note: Checking the returned Boolean (val isLoaded) is optional.
+// If you just want to preload silently in the background, you can simply call:
+// KiroSdk.ads.loadInterstitial(context, "ca-app-pub-3940256099942544/1033173712")
+lifecycleScope.launch {
+    val isLoaded = KiroSdk.ads.loadInterstitial(context, "ca-app-pub-3940256099942544/1033173712")
+    if (isLoaded) {
+        // Optional: Perform actions knowing the ad is preloaded successfully
+    }
+}
+
+// 2. Show the ad (e.g., when transitioning between screens)
+KiroSdk.ads.showInterstitial(activity = this, adUnitId = "ca-app-pub-3940256099942544/1033173712") {
+    // Callback executed when the ad is closed or if ad failed to show
+    val intent = Intent(this, NextActivity::class.java)
+    startActivity(intent)
+}
+```
+
+##### Option B: Preload with 2-Floor Waterfall (eCPM Optimization)
+Tries to load the High Floor Ad Unit first. If it fails, falls back to the Low Floor Ad Unit automatically:
+
+1. **Preload the waterfall ads**:
+```kotlin
+lifecycleScope.launch {
+    KiroSdk.ads.loadInterstitial2F(
+        context = context,
+        highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID",
+        lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID"
+    )
+}
+```
+
+2. **Show the ad when ready**:
+The SDK will automatically check which of the two floors loaded successfully and display it:
+```kotlin
+KiroSdk.ads.showInterstitial2F(
+    activity = this,
+    highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID",
+    lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID"
+) {
+    // Callback executed when the ad is closed or if both failed to load/show
+    val intent = Intent(this, NextActivity::class.java)
+    startActivity(intent)
+}
+```
+
+##### Option C: Auto Load and Show with 2-Floor Waterfall (Immediate request)
+Starts loading (High -> Low Floor) while displaying a blocking progress dialog. Shows the ad immediately upon load success, or bypasses immediately if both fail:
+```kotlin
+KiroSdk.ads.loadAndShowInterstitial2F(
+    activity = this,
+    highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID",
+    lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID",
+    onAdDismissed = {
+        // Proceed to the next screen or action
+        val intent = Intent(this, NextActivity::class.java)
+        startActivity(intent)
+    }
+)
+```
+
+#### Using Rewarded Ads
+Preload the Rewarded Ad and handle reward callbacks:
+
+```kotlin
+import kotlinx.coroutines.launch
+
+// 1. Preload the Rewarded Ad.
+// Note: Checking the returned Boolean (val isLoaded) is optional.
+// If you just want to preload silently, simply call:
+// KiroSdk.ads.loadRewarded(context, "ca-app-pub-3940256099942544/5224354917")
+lifecycleScope.launch {
+    val isLoaded = KiroSdk.ads.loadRewarded(context, "ca-app-pub-3940256099942544/5224354917")
+    if (isLoaded) {
+        // Optional: Handle actions knowing the ad loaded successfully
+    }
+}
+
+// 2. Show the ad and reward the user
+KiroSdk.ads.showRewarded(
+    activity = this,
+    adUnitId = "ca-app-pub-3940256099942544/5224354917",
+    onUserEarnedReward = { amount, type ->
+        // Grant rewards to the user here
+        println("User earned: $amount $type")
+    },
+    onAdDismissed = {
+        // Executed when the ad is dismissed
+    }
+)
+```
+
+#### Using Native Ads
+
+The SDK provides a custom view `KiroNativeAdView` (which wraps Google's `NativeAdView`) to make displaying Native Ads as simple as defining them in XML and loading them with a single line of code.
+
+##### Step 1: Declare `KiroNativeAdView` in XML
+
+You can define `KiroNativeAdView` in your layout file. To specify a custom native ad layout, pass it to the `app:layout_native` attribute. If omitted, the SDK will automatically fallback to its default design template layout.
+
+###### Option A: Using SDK Default Layout Template
+```xml
+<com.kiro.sdk.ads.KiroNativeAdView
+    android:id="@+id/kiro_native_ad"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content" />
+```
+
+###### Option B: Using Custom XML Layout
+Define your own custom XML layout (e.g., `layout_my_custom_ad.xml`) and map it using `app:layout_native`:
+```xml
+<com.kiro.sdk.ads.KiroNativeAdView
+    android:id="@+id/kiro_native_ad"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    app:layout_native="@layout/layout_my_custom_ad" />
+```
+
+> [!TIP]
+> **Custom Layout Requirement:** When using your own custom XML layout with `KiroNativeAdView`, make sure to assign standard SDK resource IDs to your layout elements:
+> - `@id/ad_headline` for the Title `TextView`
+> - `@id/ad_body` for the Description `TextView`
+> - `@id/ad_call_to_action` for the Call to Action `Button`
+> - `@id/ad_app_icon` for the Icon `ImageView`
+> - `@id/ad_media` for the Google `MediaView` (Image/Video container)
+
+---
+
+##### Step 2: Load and Display Native Ads
+
+###### Option A: Auto-Load & Show (Recommended - Easiest)
+Load and show the Native Ad dynamically inside the view with a single function call:
+
+```kotlin
+// Using View Binding
+val nativeAdView = binding.kiroNativeAd
+
+// Using standard ad unit ID
+nativeAdView.loadAndShowAd("ca-app-pub-3940256099942544/2247696110") { success ->
+    // Optional callback when loading completes
+}
+
+// Or using 2-floor waterfall priority (eCPM Optimization)
+nativeAdView.loadAndShowAd2F("HIGH_FLOOR_AD_UNIT_ID", "LOW_FLOOR_AD_UNIT_ID")
+```
+
+###### Option B: Preload Asynchronously and Bind Later (Supports Multi-Screen Flow)
+
+If you prefer to load the ad object in the background (e.g., in a splash screen, previous Activity, or a shared `ViewModel`) and display it later in another screen:
+
+1. **Preload the Ad**:
+```kotlin
+import com.google.android.gms.ads.nativead.NativeAd
+import kotlinx.coroutines.launch
+
+// You can store this in a Singleton, Application class, or a shared ViewModel
+var preloadedNativeAd: NativeAd? = null
+
+// Load the ad in your first screen (Screen A)
+lifecycleScope.launch {
+    preloadedNativeAd = KiroSdk.ads.loadNativeAd(context, "ca-app-pub-3940256099942544/2247696110")
+}
+```
+
+2. **Bind the Ad in another screen (Screen B)**:
+```kotlin
+// Retrieve and bind the preloaded ad inside Screen B's Activity/Fragment
+val ad = preloadedNativeAd
+if (ad != null) {
+    val nativeAdView = binding.kiroNativeAd
+    nativeAdView.setNativeAd(ad)
+}
+```
+
+3. **Release Resources (Important)**:
+To avoid memory leaks, always destroy the preloaded ad when the destination screen is destroyed:
+```kotlin
+override fun onDestroy() {
+    preloadedNativeAd?.destroy()
+    preloadedNativeAd = null
+    super.onDestroy()
+}
+```
+
+##### 💡 Best Practice: Preloading Multiple Ads (AdManager Template)
+
+If your application has multiple screens that each preload different Ad Unit IDs, it is highly recommended to use a centralized thread-safe `AdManager` object using a `HashMap` cache structure:
+
+```kotlin
+import android.content.Context
+import com.google.android.gms.ads.nativead.NativeAd
+import com.kiro.sdk.KiroSdk
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+
+object AdManager {
+    // Thread-safe map storing loaded ads mapped by their Ad Unit ID
+    private val preloadedAds = java.util.Collections.synchronizedMap(
+        java.util.HashMap<String, NativeAd>()
+    )
+
+    /**
+     * Start preloading a Native Ad in the background.
+     */
+    fun preloadNativeAd(context: Context, adUnitId: String) {
+        CoroutineScope(Dispatchers.Main).launch {
+            // Prevent duplicate loads if already preloaded
+            if (preloadedAds.containsKey(adUnitId)) return@launch
+
+            val ad = KiroSdk.ads.loadNativeAd(context, adUnitId)
+            if (ad != null) {
+                preloadedAds[adUnitId] = ad
+            }
+        }
+    }
+
+    /**
+     * Consume (retrieve and remove) the preloaded ad for binding.
+     * Google policies forbid displaying the same NativeAd instance on multiple views simultaneously.
+     */
+    fun consumeNativeAd(adUnitId: String): NativeAd? {
+        return preloadedAds.remove(adUnitId)
+    }
+
+    /**
+     * Destroy a specific ad to avoid memory leaks.
+     */
+    fun destroyAd(adUnitId: String) {
+        preloadedAds.remove(adUnitId)?.destroy()
+    }
+
+    /**
+     * Clear all cached ads.
+     */
+    fun destroyAll() {
+        synchronized(preloadedAds) {
+            for (ad in preloadedAds.values) {
+                ad.destroy()
+            }
+            preloadedAds.clear()
+        }
+    }
+}
+```
+
+**Usage:**
+- In `SplashActivity.onCreate`: `AdManager.preloadNativeAd(this, "HOME_AD_UNIT_ID")`
+- In `HomeActivity.onCreate`:
+  ```kotlin
+  val ad = AdManager.consumeNativeAd("HOME_AD_UNIT_ID")
+  if (ad != null) {
+      binding.kiroNativeAd.setNativeAd(ad)
+  }
+  ```
+- In `HomeActivity.onDestroy`: `AdManager.destroyAd("HOME_AD_UNIT_ID")`
+
+###### Option C: Inside Jetpack Compose
+To display native ads in Compose layouts, use the built-in `KiroNativeAd` composable. You can optionally specify a custom layout XML resource using the `layoutResId` parameter. If not provided, it falls back to the default SDK template layout.
+
+```kotlin
+import com.kiro.sdk.ads.KiroNativeAd
+
+@Composable
+fun MyScreen() {
+    Column {
+        // ...
+        
+        loadedNativeAd?.let { nativeAd ->
+            // Option C1: Using SDK Default Layout Template
+            KiroNativeAd(
+                nativeAd = nativeAd,
+                modifier = Modifier.fillMaxWidth().height(250.dp)
+            )
+
+            // Option C2: Using Custom XML Layout (e.g., layout_my_custom_ad.xml)
+            KiroNativeAd(
+                nativeAd = nativeAd,
+                layoutResId = R.layout.layout_my_custom_ad,
+                modifier = Modifier.fillMaxWidth().height(250.dp)
+            )
+        }
+    }
+}
+```
+
+###### Option D: Manual Layout Inflation & Binding (Advanced)
+If you want to manually inflate custom layouts without using `KiroNativeAdView` container:
+
+```kotlin
+// 1. Inflate your custom layout where the root is com.google.android.gms.ads.nativead.NativeAdView
+val adBinding = LayoutMyCustomNativeAdBinding.inflate(layoutInflater)
+val adView = adBinding.root // This is NativeAdView
+
+// 2. Map standard IDs or assign manually
+adView.headlineView = adBinding.tvMyCustomTitle
+adView.bodyView = adBinding.tvMyCustomDesc
+adView.callToActionView = adBinding.btnMyCustomAction
+adView.iconView = adBinding.imgMyCustomIcon
+adView.mediaView = adBinding.myCustomMediaView
+
+// 3. Assign data manually and bind to Google NativeAd
+val ad = loadedNativeAd
+if (ad != null) {
+    adBinding.tvMyCustomTitle.text = ad.headline
+    adBinding.tvMyCustomDesc.text = ad.body
+    adBinding.btnMyCustomAction.text = ad.callToAction
+    ad.icon?.let { adBinding.imgMyCustomIcon.setImageDrawable(it.drawable) }
+
+    adView.setNativeAd(ad)
+}
+
+// 4. Add to container
+binding.adContainer.removeAllViews()
+binding.adContainer.addView(adView)
+```
+
+#### Picture-in-Picture (PiP) Mode Handling
+
+Google AdMob policies strictly forbid displaying ads inside a floating Picture-in-Picture (PiP) window due to small screen dimensions and clickability rules. The SDK automates ad hiding and restoration to keep your application compliant.
+
+##### Automatic Detection (ComponentActivity)
+
+If your Activity extends `androidx.activity.ComponentActivity` (which is standard for all Jetpack Compose and `AppCompatActivity` screens), the SDK will **automatically** hook into the Activity's PiP changes.
+
+When the Activity enters PiP:
+- All active Native Ads (`KiroNativeAdView`) belonging to that Activity will automatically collapse (`GONE`).
+- All active Banner Containers belonging to that Activity will automatically collapse (`GONE`).
+- Full-screen ads (Interstitial, Rewarded) will be blocked from displaying if called on that Activity.
+
+When the Activity exits PiP:
+- Only views that were visible before entering PiP and have loaded ads will automatically restore to `VISIBLE`.
+
+##### Manual Trigger (Optional)
+
+If you are using legacy Activities that do not extend `ComponentActivity`, you can trigger the PiP change listener manually inside your Activity:
+
+```kotlin
+override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    
+    // Notify the SDK to collapse/restore ads for this activity
+    KiroSdk.ads.onPictureInPictureModeChanged(activity = this, isInPictureInPictureMode = isInPictureInPictureMode)
+}
+```
+
+##### Coexistence with Other Activities
+
+The PiP detection is activity-scoped. If a video activity enters PiP mode, ads on that specific activity will be hidden. However, any other activities running on the main screen (e.g., your `MainActivity` underneath the floating PiP window) can still load and show ads (including interstitials) normally.
+
+---
+
+### 4. Using Tracking (Analytics)
+
+Log standard events and screen views:
+
+```kotlin
+import android.os.Bundle
+import com.kiro.sdk.KiroSdk
+
+// Log a simple custom event to ALL active trackers
+KiroSdk.tracker.logEvent("click_button_premium")
+
+// Log an event with properties to ALL active trackers
+val bundle = Bundle().apply {
+    putString("item_id", "pro_version_monthly")
+    putDouble("price", 4.99)
+}
+KiroSdk.tracker.logEvent("select_promotion", bundle)
+
+// Log a screen view event (Firebase specific under the hood)
+KiroSdk.tracker.logScreenView(screenName = "HomeFragment", screenClass = "MainActivity")
+
+// Log ONLY to Facebook AppEvents
+KiroSdk.tracker.logFacebookEvent("facebook_only_event")
+
+// Log ONLY to AppsFlyer
+KiroSdk.tracker.logAppsFlyerEvent("appsflyer_only_event")
+
+// Log ONLY to Firebase
+KiroSdk.tracker.logFirebaseEvent("firebase_only_event")
+
+// Custom combination: Log to Firebase and AppsFlyer but NOT Facebook
+import com.kiro.sdk.tracking.TrackerPlatform
+KiroSdk.tracker.logEvent(
+    eventName = "custom_log_event",
+    params = bundle,
+    platforms = setOf(TrackerPlatform.FIREBASE, TrackerPlatform.APPSFLYER)
+)
+
+// Set user ID/Customer ID across Firebase, AppsFlyer, and Facebook
+KiroSdk.tracker.setUserId("user_123456")
+```
+
+---
+
+### 5. Using In-App Purchases (Google Play Billing)
+
+`KiroBilling` offers simple API flows backed by Kotlin coroutines and Flows to monitor subscription/purchase statuses smoothly:
+
+#### Observe purchase transactions (Activity or ViewModel)
+```kotlin
+import androidx.lifecycle.lifecycleScope
+import com.kiro.sdk.KiroSdk
+import com.kiro.sdk.billing.KiroBilling
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+
+lifecycleScope.launch {
+    KiroSdk.billing.purchaseEvents.collect { result ->
+        when (result) {
+            is KiroBilling.PurchaseResult.Success -> {
+                val purchase = result.purchase
+                
+                // 1. Unlock premium/purchased features here
+                println("Purchase successful: ${purchase.orderId}")
+                
+                // 2. If the user purchased the "Remove Ads" product, immediately disable ads:
+                if (purchase.products.contains("remove_ads_product_id")) {
+                    KiroSdk.disableAds()
+                }
+            }
+            is KiroBilling.PurchaseResult.Cancelled -> {
+                // User cancelled the billing flow
+            }
+            is KiroBilling.PurchaseResult.Error -> {
+                // Handle purchase errors
+                println("Purchase failed: ${result.message} (Error code: ${result.code})")
+            }
+        }
+    }
+}
+```
+
+#### Query products and trigger checkout flows
+```kotlin
+import com.android.billingclient.api.BillingClient
+import kotlinx.coroutines.launch
+
+lifecycleScope.launch {
+    // 1. Fetch available products from the Google Play Store
+    val productIds = listOf("premium_monthly", "premium_yearly")
+    val productDetailsList = KiroSdk.billing.queryProductDetails(
+        productIds = productIds,
+        productType = BillingClient.ProductType.SUBS // SUBS for subscriptions, INAPP for one-time purchases
+    )
+    
+    // 2. Launch the Play Store checkout screen
+    val premiumMonthlyDetails = productDetailsList?.find { it.productId == "premium_monthly" }
+    if (premiumMonthlyDetails != null) {
+        KiroSdk.billing.launchPurchaseFlow(activity = this@MainActivity, productDetails = premiumMonthlyDetails)
+    }
+}
+```
+
+#### Disabling Ads (Remove Ads feature)
+
+The SDK supports hiding and disabling all ads dynamically (e.g., after a successful "Remove Ads" in-app purchase). When ads are disabled, all future ad loading requests are skipped, and all active ad layouts (including `KiroNativeAdView` and banner containers) will automatically set their visibility to `GONE`.
+
+```kotlin
+// Disable all ads immediately (saves preference state automatically to SharedPreferences)
+KiroSdk.disableAds()
+
+// Or set ads enabled/disabled state programmatically:
+KiroSdk.setAdsDisabled(true) // disables ads
+KiroSdk.setAdsDisabled(false) // enables ads (useful for testing or debugging)
+
+// Check current ads status
+val isAdsDisabled = KiroSdk.isAdsDisabled
+```
+
+#### Query active purchases (Restore premium features)
+
+To restore or check any other premium VIP features owned by the user (even after clearing application local data), you can query Google Play's active purchases at any time using the `queryActivePurchases()` suspending function:
+
+```kotlin
+import kotlinx.coroutines.launch
+
+lifecycleScope.launch {
+    val activePurchases = KiroSdk.billing.queryActivePurchases()
+    if (activePurchases != null) {
+        // Check if user owns the VIP premium product
+        val isVip = activePurchases.any { purchase ->
+            purchase.products.contains("premium_vip_product_id")
+        }
+        if (isVip) {
+            // Unlock your custom premium features in the app
+            unlockVipFeature()
+        }
+    }
+}
+```
+
+#### Releasing Resources (Optional)
+
+`KiroSdk` keeps a billing connection alive for the lifetime of the app, which is the recommended setup for most apps. If you need to explicitly tear down the billing client and cancel its background work (e.g. in tests, or when fully shutting the SDK down), call:
+
+```kotlin
+KiroSdk.release()
+```
+
+After calling `release()`, you must call `KiroSdk.init(...)` again before using any SDK feature.
+
+---
+
+## 🧪 Local Verification (Maven Local)
+
+To test modifications offline on your local machine before committing code:
+
+1. Run the local publish task from the library's root directory:
+   ```bash
+   ./gradlew publishToMavenLocal
+   ```
+2. In the test application's `settings.gradle.kts`, add `mavenLocal()` at the top of the repositories block:
+   ```kotlin
+   repositories {
+       mavenLocal() // <-- Add this line first
+       google()
+       mavenCentral()
+   }
+   ```
+3. Import the snapshot version:
+   ```kotlin
+   implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.0-SNAPSHOT")
+   ```
+
+---
+
+## ❓ Troubleshooting
+
+#### The app crashes immediately on launch
+Make sure you added your AdMob **Application ID** to the host app's `AndroidManifest.xml` (see *Getting Started → Step 4*). A missing or malformed `com.google.android.gms.ads.APPLICATION_ID` meta-data causes the Google Mobile Ads SDK to crash the app at startup.
+
+#### Ads never load / `loadInterstitial` always returns `false`
+Ad loading is intentionally skipped when **any** of the following is true:
+- Ads are disabled (`KiroSdk.isAdsDisabled == true`, e.g. after a "Remove Ads" purchase).
+- UMP consent has not been gathered yet, so `KiroSdk.consent.canRequestAds()` returns `false`.
+- The host `Activity` is currently in Picture-in-Picture mode (for *show* calls).
+
+Always call `gatherConsent()` once at launch and verify `canRequestAds()` returns `true` before expecting ads. See the *EU User Consent* section.
+
+#### Nothing happens after calling `gatherConsent()` and no consent form appears
+This is usually **expected behavior**, not a bug. The UMP consent form is shown based on your AdMob/Funding Choices configuration **and** the user's geographic region:
+- Users in the **EU/EEA and UK** typically see the GDPR consent form.
+- Users **outside** those regions usually see no form, and `canRequestAds()` returns `true` immediately, so ads load normally.
+
+You should still call `gatherConsent()` for **every** user regardless of region, because the same build may be installed by an EU user. To preview the EU form while developing outside the EU, configure UMP debug settings (test device ID + `DebugGeography.DEBUG_GEOGRAPHY_EEA`) in the Google UMP SDK.
+
+> [!NOTE]
+> To force the EEA consent form for local testing from anywhere, pass test device IDs and `forceEeaForTesting = true` to `gatherConsent()` (see *Testing the consent form* below).
+
+#### Real ads show up during development (risk of an AdMob ban)
+Register your device as a test device via `KiroAds.Config(testDeviceIds = listOf("..."))` in `SdkConfig`. Run the app once, then copy the device ID printed in Logcat (look for a line like `Use RequestConfiguration.Builder().setTestDeviceIds(...)`) and add it to the list. Also prefer Google's sample Ad Unit IDs while debugging.
+
+#### Banner / Native ad space is blank
+- Confirm consent allows ads and that ads are not disabled.
+- Native ads: make sure your custom layout uses the required IDs (`@id/ad_headline`, `@id/ad_body`, `@id/ad_call_to_action`, `@id/ad_app_icon`, `@id/ad_media`).
+- Test ad fill is not guaranteed for every request; retry or use the 2-floor (`...2F`) variants.
+
+#### Facebook events are not tracked
+Set `enableFacebook = true` in `KiroTracker.Config` **and** declare the Facebook App ID + Client Token in your manifest and string resources (see *Getting Started → Step 3*).
+
+#### "Remove Ads" state is lost after reinstall / clearing data
+Declare your remove-ads product/subscription IDs in `KiroBilling.Config(removeAdsProductIds = listOf(...))`. On launch the SDK queries Google Play and automatically re-disables ads if an active matching purchase is found.
