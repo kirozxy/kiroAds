@@ -80,7 +80,7 @@ afterEvaluate {
             register<MavenPublication>("release") {
                 groupId = "com.github.kirozxy.kiroAds"
                 artifactId = "kirosdk"
-                version = "1.0.0-SNAPSHOT"
+                version = System.getenv("VERSION") ?: "1.0.0"
 
                 from(components["release"])
             }

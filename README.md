@@ -1,5 +1,8 @@
 # kiroAds SDK
 
+[![](https://jitpack.io/v/kirozxy/kiroAds.svg)](https://jitpack.io/#kirozxy/kiroAds)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 `kiroAds` is a unified Android Library (SDK) designed to simplify the integration of **Ads (AdMob)**, **Tracking (Firebase Analytics)**, and **In-App Purchases (Google Play Billing)** into your Android applications with minimal code configuration.
 
 ---
@@ -27,7 +30,7 @@ Add the dependency to your app-level `build.gradle.kts` file:
 
 ```kotlin
 dependencies {
-    implementation("com.github.kirozxy.kiroAds:kirosdk:LATEST_VERSION")
+    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.0")
 }
 ```
 
