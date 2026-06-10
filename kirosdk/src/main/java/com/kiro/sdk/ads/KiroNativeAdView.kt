@@ -77,24 +77,46 @@ class KiroNativeAdView : FrameLayout {
     private var isAdLoaded = false
     private var isPiPHidden = false
     private var currentNativeAd: NativeAd? = null
+    /**
+     * True when the SDK loaded the current ad on behalf of this view (via [loadAndShowAd]
+     * or [loadAndShowAd2F]). In that case, the SDK owns the ad lifecycle and must destroy it
+     * when the view is detached. False when the dev supplied the ad via [setNativeAd] —
+     * the dev keeps full control of the ad's lifecycle (typical for lists / ViewModels).
+     */
+    private var ownsCurrentAd = false
 
     /**
-     * Binds a loaded NativeAd object to the views and registers it with the Google wrapper.
+     * Binds an externally loaded NativeAd object to the view.
+     *
+     * The dev keeps full control of the ad's lifecycle: the SDK will NOT call
+     * [NativeAd.destroy] on this ad when the view is detached. Use this when the ad is shared
+     * across multiple views or held in a ViewModel (typical for lists like LazyColumn /
+     * RecyclerView, or for cross-screen preloading).
      */
     fun setNativeAd(nativeAd: NativeAd) {
+        bindNativeAd(nativeAd, owned = false)
+    }
+
+    /**
+     * Internal binding used by [loadAndShowAd] / [loadAndShowAd2F]. The SDK owns the ad and
+     * will destroy it when the view detaches.
+     */
+    internal fun bindNativeAd(nativeAd: NativeAd, owned: Boolean) {
         if (KiroSdk.isAdsDisabled) {
             this.visibility = GONE
             isAdLoaded = false
-            currentNativeAd?.destroy()
+            if (ownsCurrentAd) currentNativeAd?.destroy()
             currentNativeAd = null
+            ownsCurrentAd = false
             return
         }
 
-        // Destroy the old native ad to avoid memory leak
-        if (currentNativeAd != nativeAd) {
+        // Only destroy the previous ad if the SDK owned it. External ads belong to the caller.
+        if (currentNativeAd != nativeAd && ownsCurrentAd) {
             currentNativeAd?.destroy()
         }
         currentNativeAd = nativeAd
+        ownsCurrentAd = owned
         isAdLoaded = true
 
         val activity = context.findActivity()
@@ -144,7 +166,7 @@ class KiroNativeAdView : FrameLayout {
             // Make sure the activity is still alive before showing the ad or executing the callback
             if (activity == null || activity.isActivityAlive()) {
                 if (nativeAd != null) {
-                    setNativeAd(nativeAd)
+                    bindNativeAd(nativeAd, owned = true)
                     onComplete?.invoke(true)
                 } else {
                     onComplete?.invoke(false)
@@ -174,7 +196,7 @@ class KiroNativeAdView : FrameLayout {
             // Make sure the activity is still alive before showing the ad or executing the callback
             if (activity == null || activity.isActivityAlive()) {
                 if (nativeAd != null) {
-                    setNativeAd(nativeAd)
+                    bindNativeAd(nativeAd, owned = true)
                     onComplete?.invoke(true)
                 } else {
                     onComplete?.invoke(false)
@@ -191,9 +213,13 @@ class KiroNativeAdView : FrameLayout {
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         KiroSdk.ads.unregisterNativeAdView(this)
-        // Destroy native ad when detached to avoid memory leak
-        currentNativeAd?.destroy()
+        // Only destroy when the SDK owns the ad. External ads stay alive — the dev manages them
+        // (e.g. across LazyColumn / RecyclerView item recycling, or shared across screens).
+        if (ownsCurrentAd) {
+            currentNativeAd?.destroy()
+        }
         currentNativeAd = null
+        ownsCurrentAd = false
         isAdLoaded = false
     }
 }

@@ -30,6 +30,16 @@ import kotlin.coroutines.resume
 
 class KiroAds(val config: Config) {
 
+    /**
+     * Auto-managed App Open ad helper. Call [KiroAppOpenAdManager.start] from your Application
+     * class once to enable automatic show-on-foreground behavior.
+     */
+    val appOpen: KiroAppOpenAdManager = KiroAppOpenAdManager()
+
+    private val loadedAppOpenAds = java.util.Collections.synchronizedMap(
+        java.util.HashMap<String, com.google.android.gms.ads.appopen.AppOpenAd>()
+    )
+
     private val loadedInterstitialAds = java.util.Collections.synchronizedMap(
         java.util.HashMap<String, InterstitialAd>()
     )
@@ -45,6 +55,41 @@ class KiroAds(val config: Config) {
     private val activeBannerContainers = java.util.Collections.synchronizedMap(
         java.util.WeakHashMap<ViewGroup, Boolean>()
     )
+
+    // ---------- Full-screen ad cooldown (Interstitial + App Open) ----------
+
+    @Volatile
+    private var lastFullScreenShownAt: Long = 0L
+
+    @Volatile
+    private var fullScreenAdCooldownMs: Long = config.fullScreenAdCooldownMs
+
+    /**
+     * Updates the cooldown (in ms) between two full-screen ads (Interstitial + App Open).
+     * Set to 0 to disable. Defaults to [Config.fullScreenAdCooldownMs] (30s).
+     */
+    fun setFullScreenAdCooldownMs(ms: Long) {
+        fullScreenAdCooldownMs = ms.coerceAtLeast(0L)
+    }
+
+    /** Current full-screen ad cooldown in ms. */
+    fun getFullScreenAdCooldownMs(): Long = fullScreenAdCooldownMs
+
+    /** Resets the cooldown timer immediately so the next full-screen ad can show. */
+    fun resetFullScreenAdCooldown() {
+        lastFullScreenShownAt = 0L
+    }
+
+    /** True when enough time has passed since the last full-screen ad to show another. */
+    internal fun canShowFullScreenAd(): Boolean {
+        if (fullScreenAdCooldownMs <= 0L) return true
+        return System.currentTimeMillis() - lastFullScreenShownAt >= fullScreenAdCooldownMs
+    }
+
+    /** Marks "now" as the last full-screen ad show time. Called by show paths after `ad.show(...)`. */
+    internal fun markFullScreenAdShown() {
+        lastFullScreenShownAt = System.currentTimeMillis()
+    }
 
     /**
      * Hides and destroys all active ads immediately (e.g. when removing ads on purchase).
@@ -175,6 +220,11 @@ class KiroAds(val config: Config) {
             onAdDismissed?.invoke()
             return
         }
+        if (!canShowFullScreenAd()) {
+            Log.d("KiroAds", "Interstitial blocked by full-screen ad cooldown.")
+            onAdDismissed?.invoke()
+            return
+        }
         val ad = loadedInterstitialAds.remove(adUnitId)
         if (ad != null) {
             ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
@@ -192,6 +242,7 @@ class KiroAds(val config: Config) {
                 }
             }
             ad.show(activity)
+            markFullScreenAdShown()
         } else {
             Log.w("KiroAds", "Interstitial Ad is not ready yet.")
             onAdDismissed?.invoke()
@@ -222,6 +273,7 @@ class KiroAds(val config: Config) {
         activity: Activity,
         highAdUnitId: String,
         lowAdUnitId: String,
+        loadingConfig: KiroLoadingDialogConfig = KiroLoadingDialogConfig(),
         onAdDismissed: () -> Unit
     ) {
         if (!activity.isActivityAlive()) {
@@ -230,7 +282,7 @@ class KiroAds(val config: Config) {
         }
 
         // Show preparing ad loading dialog locally
-        val dialog = createLoadingDialog(activity)
+        val dialog = createLoadingDialog(activity, loadingConfig)
         dialog.show()
 
         val scope = activity.getLifecycleScope()
@@ -329,6 +381,196 @@ class KiroAds(val config: Config) {
         } else {
             Log.w("KiroAds", "Rewarded Ad is not ready yet.")
             onAdDismissed?.invoke()
+        }
+    }
+
+    /**
+     * Loads a Rewarded Ad with a 2-floor priority waterfall.
+     * Tries high priority first, falls back to low priority if it fails.
+     * Returns true if successfully loaded on either floor, false otherwise.
+     */
+    suspend fun loadRewarded2F(context: Context, highAdUnitId: String, lowAdUnitId: String): Boolean {
+        var loaded = loadRewarded(context, highAdUnitId)
+        if (!loaded) {
+            Log.d("KiroAds", "High floor Rewarded failed to load. Fetching low floor...")
+            loaded = loadRewarded(context, lowAdUnitId)
+        }
+        return loaded
+    }
+
+    /**
+     * Shows the Rewarded Ad from a 2-floor waterfall by checking either the high or low floor cache.
+     */
+    fun showRewarded2F(
+        activity: Activity,
+        highAdUnitId: String,
+        lowAdUnitId: String,
+        onUserEarnedReward: (amount: Int, type: String) -> Unit,
+        onAdDismissed: (() -> Unit)? = null
+    ) {
+        if (loadedRewardedAds.containsKey(highAdUnitId)) {
+            showRewarded(activity, highAdUnitId, onUserEarnedReward, onAdDismissed)
+        } else if (loadedRewardedAds.containsKey(lowAdUnitId)) {
+            showRewarded(activity, lowAdUnitId, onUserEarnedReward, onAdDismissed)
+        } else {
+            Log.w("KiroAds", "Neither high floor ($highAdUnitId) nor low floor ($lowAdUnitId) Rewarded Ad is ready yet.")
+            onAdDismissed?.invoke()
+        }
+    }
+
+    /**
+     * Loads a Rewarded ad with a 2-floor waterfall (High -> Low) and shows it automatically
+     * upon successful load. Displays a blocking fullscreen progress dialog during loading
+     * (customizable via [loadingConfig]). If both floors fail, [onAdDismissed] is invoked
+     * immediately without rewarding the user.
+     */
+    fun loadAndShowRewarded2F(
+        activity: Activity,
+        highAdUnitId: String,
+        lowAdUnitId: String,
+        onUserEarnedReward: (amount: Int, type: String) -> Unit,
+        loadingConfig: KiroLoadingDialogConfig = KiroLoadingDialogConfig(),
+        onAdDismissed: () -> Unit
+    ) {
+        if (!activity.isActivityAlive()) {
+            onAdDismissed()
+            return
+        }
+
+        val dialog = createLoadingDialog(activity, loadingConfig)
+        dialog.show()
+
+        val scope = activity.getLifecycleScope()
+        scope.launch {
+            val loaded = loadRewarded2F(activity, highAdUnitId, lowAdUnitId)
+
+            activity.runOnUiThread {
+                if (activity.isActivityAlive()) {
+                    dialog.dismiss()
+                }
+            }
+
+            if (activity.isActivityAlive()) {
+                if (loaded) {
+                    showRewarded2F(activity, highAdUnitId, lowAdUnitId, onUserEarnedReward, onAdDismissed)
+                } else {
+                    Log.e("KiroAds", "Both Rewarded floors failed to load. Skipping ad.")
+                    onAdDismissed()
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads an App Open Ad asynchronously. For manual control. If you prefer auto show-on-foreground,
+     * use [appOpen] (KiroAppOpenAdManager) instead.
+     */
+    suspend fun loadAppOpen(
+        context: Context,
+        adUnitId: String
+    ): Boolean {
+        if (KiroSdk.isAdsDisabled || !KiroConsentManager.canRequestAds(context)) {
+            Log.d("KiroAds", "Ads disabled or consent not granted. Skipping loadAppOpen.")
+            return false
+        }
+        return suspendCancellableCoroutine { continuation ->
+            com.google.android.gms.ads.appopen.AppOpenAd.load(
+                context, adUnitId, AdRequest.Builder().build(),
+                object : com.google.android.gms.ads.appopen.AppOpenAd.AppOpenAdLoadCallback() {
+                    override fun onAdLoaded(ad: com.google.android.gms.ads.appopen.AppOpenAd) {
+                        loadedAppOpenAds[adUnitId] = ad
+                        ad.setOnPaidEventListener { adValue ->
+                            KiroLogEventManager.logPaidAdImpression(context, adValue, adUnitId, "AppOpen")
+                        }
+                        if (continuation.isActive) continuation.resume(true)
+                    }
+
+                    override fun onAdFailedToLoad(error: LoadAdError) {
+                        loadedAppOpenAds.remove(adUnitId)
+                        Log.e("KiroAds", "Error loading App Open: ${error.message}")
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                }
+            )
+        }
+    }
+
+    /**
+     * Shows a previously loaded App Open Ad. For manual control. The ad is consumed (one-shot).
+     */
+    fun showAppOpen(activity: Activity, adUnitId: String, onAdDismissed: (() -> Unit)? = null) {
+        if (KiroSdk.isAdsDisabled || activity.isActivityInPiP()) {
+            onAdDismissed?.invoke()
+            return
+        }
+        if (!canShowFullScreenAd()) {
+            Log.d("KiroAds", "App Open blocked by full-screen ad cooldown.")
+            onAdDismissed?.invoke()
+            return
+        }
+        val ad = loadedAppOpenAds.remove(adUnitId)
+        if (ad == null) {
+            Log.w("KiroAds", "App Open Ad is not ready yet.")
+            onAdDismissed?.invoke()
+            return
+        }
+        ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
+            override fun onAdClicked() {
+                KiroLogEventManager.logClickAdsEvent(adUnitId)
+            }
+
+            override fun onAdDismissedFullScreenContent() { onAdDismissed?.invoke() }
+            override fun onAdFailedToShowFullScreenContent(adError: com.google.android.gms.ads.AdError) {
+                onAdDismissed?.invoke()
+            }
+        }
+        ad.show(activity)
+        markFullScreenAdShown()
+    }
+
+    /**
+     * Loads an App Open ad and shows it as soon as it's ready, displaying a fullscreen loading
+     * dialog while waiting. Designed for splash flows where you want to gate navigation behind the
+     * ad. If loading takes longer than [timeoutMs] or fails, [onAdDismissed] is invoked
+     * immediately so the user is not blocked.
+     *
+     * If you also use the auto-managed mode ([appOpen]), add your splash Activity to its
+     * blocklist via `appOpen.start(blockedActivities = setOf(SplashActivity::class.java, ...))`
+     * to avoid duplicate shows on the same foreground event.
+     */
+    fun loadAndShowAppOpen(
+        activity: Activity,
+        adUnitId: String,
+        timeoutMs: Long = 5000L,
+        loadingConfig: KiroLoadingDialogConfig = KiroLoadingDialogConfig(),
+        onAdDismissed: () -> Unit
+    ) {
+        if (!activity.isActivityAlive()) {
+            onAdDismissed()
+            return
+        }
+
+        val dialog = createLoadingDialog(activity, loadingConfig)
+        dialog.show()
+
+        val scope = activity.getLifecycleScope()
+        scope.launch {
+            val loaded = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                loadAppOpen(activity, adUnitId)
+            } ?: false
+
+            activity.runOnUiThread {
+                if (activity.isActivityAlive()) dialog.dismiss()
+            }
+
+            if (activity.isActivityAlive()) {
+                if (loaded) {
+                    showAppOpen(activity, adUnitId, onAdDismissed)
+                } else {
+                    Log.w("KiroAds", "App Open load timed out or failed within ${timeoutMs}ms. Skipping ad.")
+                    onAdDismissed()
+                }
+            }
         }
     }
 
@@ -618,30 +860,23 @@ class KiroAds(val config: Config) {
         adView.setNativeAd(nativeAd)
     }
 
-    private fun createLoadingDialog(activity: Activity): android.app.Dialog {
-        val builder = android.app.AlertDialog.Builder(activity)
-        val layout = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(50, 40, 50, 40)
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val progressBar = ProgressBar(activity).apply {
-            isIndeterminate = true
-        }
-        val textView = TextView(activity).apply {
-            text = "Preparing Ad..."
-            textSize = 16f
-            setPadding(40, 0, 0, 0)
-        }
-        layout.addView(progressBar)
-        layout.addView(textView)
-        builder.setView(layout)
-        builder.setCancelable(false)
-        return builder.create()
+    private fun createLoadingDialog(activity: Activity, config: KiroLoadingDialogConfig): android.app.Dialog {
+        return buildLoadingDialog(activity, config)
     }
 
     data class Config(
-        val testDeviceIds: List<String> = emptyList()
+        val testDeviceIds: List<String> = emptyList(),
+        /**
+         * Minimum elapsed time (in ms) between two full-screen ads (Interstitial OR App Open).
+         * Within this window, further full-screen show requests are silently skipped and their
+         * `onAdDismissed` callback fires immediately so the user can proceed.
+         *
+         * Rewarded ads are NOT subject to this cooldown because they are user-initiated and the
+         * user expects the reward.
+         *
+         * Default: 30 seconds. Set to 0 to disable cooldown.
+         */
+        val fullScreenAdCooldownMs: Long = 30_000L
     )
 }
 

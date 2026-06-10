@@ -291,6 +291,38 @@ KiroSdk.ads.loadInterstitial(context, AdUnitIds.INTER_SPLASH_HIGH)
 
 ---
 
+---
+
+#### Full-Screen Ad Cooldown (Interstitial + App Open)
+
+To avoid annoying users with back-to-back full-screen ads, the SDK enforces a **global cooldown** between any two full-screen ads (Interstitial + App Open). Within the cooldown window, further show requests are silently skipped and their `onAdDismissed` callback fires immediately so navigation continues.
+
+**Default: 30 seconds.** Rewarded ads are NOT subject to this cooldown — they are user-initiated and the user expects the reward.
+
+Configure once in `SdkConfig`:
+```kotlin
+KiroSdk.init(
+    context = this,
+    config = KiroSdk.SdkConfig(
+        adConfig = KiroAds.Config(
+            testDeviceIds = listOf("..."),
+            fullScreenAdCooldownMs = 30_000L  // 30s default; set 0 to disable
+        )
+    )
+)
+```
+
+Or change at runtime:
+```kotlin
+KiroSdk.ads.setFullScreenAdCooldownMs(45_000L)   // 45s
+KiroSdk.ads.setFullScreenAdCooldownMs(0L)        // disable cooldown entirely
+KiroSdk.ads.resetFullScreenAdCooldown()          // forget last show -> next ad shows immediately
+val current = KiroSdk.ads.getFullScreenAdCooldownMs()
+```
+
+> [!TIP]
+> Use `resetFullScreenAdCooldown()` right after a paid Remove Ads upgrade is reverted (debug only) or to bypass cooldown for a special promotional moment. Avoid calling it routinely or it defeats the purpose.
+
 #### Displaying a Banner Ad
 
 ##### Option A: For XML layouts (View-based)
@@ -386,7 +418,7 @@ KiroSdk.ads.showInterstitial2F(
 ```
 
 ##### Option C: Auto Load and Show with 2-Floor Waterfall (Immediate request)
-Starts loading (High -> Low Floor) while displaying a blocking progress dialog. Shows the ad immediately upon load success, or bypasses immediately if both fail:
+Starts loading (High -> Low Floor) while displaying a blocking fullscreen progress dialog. Shows the ad immediately upon load success, or bypasses immediately if both fail:
 ```kotlin
 KiroSdk.ads.loadAndShowInterstitial2F(
     activity = this,
@@ -397,6 +429,43 @@ KiroSdk.ads.loadAndShowInterstitial2F(
         val intent = Intent(this, NextActivity::class.java)
         startActivity(intent)
     }
+)
+```
+
+###### Customizing the Loading Dialog
+Both `loadAndShowInterstitial2F` and `loadAndShowRewarded2F` accept an optional `KiroLoadingDialogConfig` so you can match your app's theme. There are three levels of customization, in order of priority:
+
+```kotlin
+import android.graphics.Color
+import com.kiro.sdk.ads.KiroLoadingDialogConfig
+
+// Level 1: tweak default fullscreen overlay (background, progress color, text)
+// Defaults: white background, black text, amber yellow progress, "Loading ad..." caption.
+val styled = KiroLoadingDialogConfig(
+    backgroundColor = Color.parseColor("#CC101820"),
+    progressColor = Color.parseColor("#FFD54F"),
+    textColor = Color.WHITE,
+    text = "Loading ad..."
+)
+
+// Level 2: provide your own layout XML — SDK inflates and shows it fullscreen
+val customLayout = KiroLoadingDialogConfig(
+    customLayoutResId = R.layout.my_loading_overlay
+)
+
+// Level 3: full override — return your own ready-to-show Dialog
+val fullOverride = KiroLoadingDialogConfig(
+    customDialog = { activity ->
+        MyBrandedLoadingDialog(activity)
+    }
+)
+
+KiroSdk.ads.loadAndShowInterstitial2F(
+    activity = this,
+    highAdUnitId = "...",
+    lowAdUnitId = "...",
+    loadingConfig = styled,
+    onAdDismissed = { /* ... */ }
 )
 ```
 
@@ -430,6 +499,38 @@ KiroSdk.ads.showRewarded(
     }
 )
 ```
+
+##### 2-Floor Waterfall variants
+Same eCPM optimization as interstitial — try the high floor first, fall back to the low floor:
+
+```kotlin
+// Manual preload + show
+lifecycleScope.launch {
+    KiroSdk.ads.loadRewarded2F(context, "HIGH_FLOOR_AD_UNIT_ID", "LOW_FLOOR_AD_UNIT_ID")
+}
+
+KiroSdk.ads.showRewarded2F(
+    activity = this,
+    highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID",
+    lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID",
+    onUserEarnedReward = { amount, type -> /* grant reward */ },
+    onAdDismissed = { /* ... */ }
+)
+
+// Auto load and show with fullscreen loading dialog
+KiroSdk.ads.loadAndShowRewarded2F(
+    activity = this,
+    highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID",
+    lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID",
+    onUserEarnedReward = { amount, type -> /* grant reward */ },
+    onAdDismissed = {
+        // Called when the ad is dismissed, or immediately if both floors fail to load.
+    }
+)
+```
+
+> [!NOTE]
+> `loadAndShowRewarded2F` accepts the same `loadingConfig: KiroLoadingDialogConfig` parameter as the interstitial variant. See *Customizing the Loading Dialog* above.
 
 #### Using Native Ads
 
@@ -599,6 +700,9 @@ object AdManager {
 ###### Option C: Inside Jetpack Compose
 To display native ads in Compose layouts, use the built-in `KiroNativeAd` composable. You can optionally specify a custom layout XML resource using the `layoutResId` parameter. If not provided, it falls back to the default SDK template layout.
 
+> [!NOTE]
+> **Custom rendering in Compose:** Google's `NativeAdView` requires registered Android `View` references (TextView, Button, ImageView, MediaView) for click attribution and impression tracking, so a fully Compose-only layout is not supported. The recommended pattern is to design your own XML layout (with the standard IDs `@id/ad_headline`, `@id/ad_body`, `@id/ad_call_to_action`, `@id/ad_app_icon`, `@id/ad_media`) and reference it through `layoutResId`. The SDK takes care of binding and tracking; you keep full visual control through standard XML / Material theming.
+
 ```kotlin
 import com.kiro.sdk.ads.KiroNativeAd
 
@@ -656,6 +760,82 @@ binding.adContainer.removeAllViews()
 binding.adContainer.addView(adView)
 ```
 
+#### Native Ads in Lists (LazyColumn / RecyclerView)
+
+The SDK lets you reuse a `NativeAd` across list-item recycling without ever extending the SDK. The key is **ownership**:
+
+- `KiroNativeAdView.setNativeAd(ad)` — you load and own the ad. The view never destroys it on detach. Ideal for items in `LazyColumn`, `RecyclerView`, or shared across screens.
+- `KiroNativeAdView.loadAndShowAd*` — the SDK loads and owns the ad. The view destroys it on detach (1-shot screens).
+
+Always destroy externally-loaded ads yourself — typically in `ViewModel.onCleared()`.
+
+##### Compose — LazyColumn
+```kotlin
+class FeedViewModel : ViewModel() {
+    private val _ads = MutableStateFlow<List<NativeAd>>(emptyList())
+    val ads = _ads.asStateFlow()
+
+    fun preload(context: Context, slots: Int = 3, adUnitId: String) {
+        viewModelScope.launch {
+            val loaded = (0 until slots).mapNotNull {
+                KiroSdk.ads.loadNativeAd(context, adUnitId)
+            }
+            _ads.value = loaded
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        _ads.value.forEach { it.destroy() }   // we own the ads
+    }
+}
+
+@Composable
+fun Feed(items: List<Post>, ads: List<NativeAd>) {
+    LazyColumn {
+        itemsIndexed(items) { index, post ->
+            PostItem(post)
+            if (index % 5 == 4) {
+                ads.getOrNull(index / 5)?.let { ad ->
+                    KiroNativeAd(
+                        nativeAd = ad,
+                        modifier = Modifier.fillMaxWidth().height(280.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+```
+
+##### XML — RecyclerView
+```kotlin
+class FeedAdapter(
+    private val items: List<Item>,
+    private val ads: List<NativeAd>
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    override fun getItemViewType(p: Int) = if (p % 5 == 4) TYPE_AD else TYPE_CONTENT
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) = when (viewType) {
+        TYPE_AD -> AdVH(KiroNativeAdView(parent.context, R.layout.item_native_ad))
+        else -> ContentVH(LayoutInflater.from(parent.context).inflate(R.layout.item_post, parent, false))
+    }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, p: Int) {
+        if (holder is AdVH) ads[p / 5].let(holder.adView::setNativeAd)
+    }
+
+    override fun getItemCount() = items.size
+    private class AdVH(val adView: KiroNativeAdView) : RecyclerView.ViewHolder(adView)
+
+    companion object { private const val TYPE_AD = 1; private const val TYPE_CONTENT = 0 }
+}
+```
+
+> [!IMPORTANT]
+> Per Google policy, **the same `NativeAd` instance must not be displayed in two views at the same time**. Preload as many ads as concurrent slots you expect, or load on demand per slot.
+
 #### Picture-in-Picture (PiP) Mode Handling
 
 Google AdMob policies strictly forbid displaying ads inside a floating Picture-in-Picture (PiP) window due to small screen dimensions and clickability rules. The SDK automates ad hiding and restoration to keep your application compliant.
@@ -688,6 +868,102 @@ override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, ne
 ##### Coexistence with Other Activities
 
 The PiP detection is activity-scoped. If a video activity enters PiP mode, ads on that specific activity will be hidden. However, any other activities running on the main screen (e.g., your `MainActivity` underneath the floating PiP window) can still load and show ads (including interstitials) normally.
+
+---
+
+#### Using App Open Ads
+
+App Open ads are full-screen ads that appear when the app comes to the foreground (cold start or warm resume). The SDK supports two integration modes:
+
+##### Mode A: Auto-managed (Recommended)
+The SDK preloads on cold start, listens to `ProcessLifecycleOwner` for foreground events, and automatically shows the ad when appropriate. Cold-start show is skipped by default to avoid clashing with your splash flow.
+
+Pass a **blocklist** of Activity classes where auto-show should be suppressed (typically your splash, onboarding, paywall, settings):
+```kotlin
+// Application.onCreate(), AFTER KiroSdk.init(...)
+KiroSdk.ads.appOpen.start(
+    application = this,
+    adUnitId = "ca-app-pub-3940256099942544/9257395921", // Google's App Open test ID
+    skipFirstLaunch = true,
+    blockedActivities = setOf(
+        SplashActivity::class.java,
+        OnboardingActivity::class.java,
+        PremiumPurchaseActivity::class.java
+    )
+)
+```
+
+You can also adjust the blocklist at runtime:
+```kotlin
+KiroSdk.ads.appOpen.addBlockedActivity(NewSensitiveScreen::class.java)
+KiroSdk.ads.appOpen.removeBlockedActivity(OnboardingActivity::class.java)
+KiroSdk.ads.appOpen.setBlockedActivities(setOf(/* full replace */))
+```
+
+For one-off suppression (e.g. you're about to show your own splash interstitial and don't want App Open to compete on this single foreground event):
+```kotlin
+KiroSdk.ads.appOpen.disableNextShow()
+```
+
+`KiroSdk.release()` automatically calls `appOpen.stop()` for you.
+
+##### Mode B: Manual control
+If you want full control over when the ad shows (e.g. only on specific screens), use the suspend API:
+```kotlin
+lifecycleScope.launch {
+    val isLoaded = KiroSdk.ads.loadAppOpen(context, "AD_UNIT_ID")
+    if (isLoaded) {
+        KiroSdk.ads.showAppOpen(activity = this@MyActivity, adUnitId = "AD_UNIT_ID") {
+            // ad dismissed
+        }
+    }
+}
+```
+
+##### Mode C: Splash (Show App Open instead of Interstitial)
+If you prefer to gate your splash screen behind an App Open ad rather than an Interstitial, use `loadAndShowAppOpen`. It mirrors `loadAndShowInterstitial2F`: shows a fullscreen loading dialog, waits up to `timeoutMs`, shows the ad on success, calls `onAdDismissed` on failure/timeout/dismiss.
+
+```kotlin
+class SplashActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_splash)
+
+        // Gather consent first, then show App Open as the splash gate.
+        KiroSdk.consent.gatherConsent(this) { _ ->
+            if (KiroSdk.consent.canRequestAds(this)) {
+                KiroSdk.ads.loadAndShowAppOpen(
+                    activity = this,
+                    adUnitId = "ca-app-pub-3940256099942544/9257395921",
+                    timeoutMs = 5000L,
+                    onAdDismissed = { goToMain() }
+                )
+            } else {
+                goToMain()
+            }
+        }
+    }
+
+    private fun goToMain() {
+        startActivity(Intent(this, MainActivity::class.java))
+        finish()
+    }
+}
+```
+
+> [!NOTE]
+> If you use Mode C **and** Mode A together, add your splash Activity to the auto-managed blocklist so the same foreground event doesn't trigger two App Open shows:
+> ```kotlin
+> KiroSdk.ads.appOpen.start(
+>     application = this,
+>     adUnitId = "...",
+>     blockedActivities = setOf(SplashActivity::class.java)
+> )
+> ```
+
+> [!IMPORTANT]
+> Per Google guidance, App Open ads expire **4 hours** after load. The auto-managed mode handles this transparently. In manual mode, reload after expiration.
+> The SDK also automatically blocks App Open shows when ads are disabled, when the user is in PiP mode, or when consent has not been gathered.
 
 ---
 

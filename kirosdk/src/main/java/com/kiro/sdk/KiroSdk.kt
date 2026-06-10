@@ -152,6 +152,9 @@ object KiroSdk {
      */
     fun release() {
         if (isInitialized) {
+            if (::ads.isInitialized) {
+                ads.appOpen.stop()
+            }
             if (::billing.isInitialized) {
                 billing.release()
             }
