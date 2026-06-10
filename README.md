@@ -1120,29 +1120,6 @@ After calling `release()`, you must call `KiroSdk.init(...)` again before using 
 
 ---
 
-## 🧪 Local Verification (Maven Local)
-
-To test modifications offline on your local machine before committing code:
-
-1. Run the local publish task from the library's root directory:
-   ```bash
-   ./gradlew publishToMavenLocal
-   ```
-2. In the test application's `settings.gradle.kts`, add `mavenLocal()` at the top of the repositories block:
-   ```kotlin
-   repositories {
-       mavenLocal() // <-- Add this line first
-       google()
-       mavenCentral()
-   }
-   ```
-3. Import the snapshot version:
-   ```kotlin
-   implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.0-SNAPSHOT")
-   ```
-
----
-
 ## ❓ Troubleshooting
 
 #### The app crashes immediately on launch
