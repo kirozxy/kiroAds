@@ -107,7 +107,10 @@ class MyApp : Application() {
                 trackingConfig = KiroTracker.Config(
                     enableFirebase = true,
                     appsFlyerDevKey = "YOUR_APPSFLYER_DEV_KEY", // Provide dev key to enable AppsFlyer
-                    enableFacebook = true // Set to true to enable Facebook AppEvents
+                    enableFacebook = true, // Set to true to enable Facebook AppEvents
+                    adjustAppToken = "YOUR_ADJUST_APP_TOKEN",   // Provide token to enable Adjust
+                    adjustSandbox = BuildConfig.DEBUG,          // sandbox env in debug, production in release
+                    adjustEventTokens = AdjustEvents.tokens     // see "Adjust event tokens" section below
                 ),
                 billingConfig = KiroBilling.Config(
                     enableBilling = true,
@@ -997,6 +1000,12 @@ KiroSdk.tracker.logAppsFlyerEvent("appsflyer_only_event")
 // Log ONLY to Firebase
 KiroSdk.tracker.logFirebaseEvent("firebase_only_event")
 
+// Log ONLY to Adjust (requires a token mapped in Config.adjustEventTokens)
+KiroSdk.tracker.logAdjustEvent("purchase", Bundle().apply {
+    putDouble("value", 4.99)
+    putString("currency", "USD")
+})
+
 // Custom combination: Log to Firebase and AppsFlyer but NOT Facebook
 import com.kiro.sdk.tracking.TrackerPlatform
 KiroSdk.tracker.logEvent(
@@ -1005,8 +1014,110 @@ KiroSdk.tracker.logEvent(
     platforms = setOf(TrackerPlatform.FIREBASE, TrackerPlatform.APPSFLYER)
 )
 
-// Set user ID/Customer ID across Firebase, AppsFlyer, and Facebook
+// Set user ID/Customer ID across Firebase, AppsFlyer, Facebook, and Adjust
 KiroSdk.tracker.setUserId("user_123456")
+```
+
+#### Adjust event tokens
+Adjust does not accept event names directly. You must create event tokens on the Adjust dashboard, then map them in the SDK config.
+
+##### 💡 Best Practice: Centralize events in a single object
+Mirror the [AdUnitIds pattern](#-best-practice-managing-ad-unit-ids) so event names and Adjust tokens live in one source of truth. This avoids typos and makes refactors safe across the codebase:
+
+```kotlin
+package com.your.app.config
+
+object AdjustEvents {
+    // Event names — used everywhere in the app code
+    const val PURCHASE          = "purchase"
+    const val TUTORIAL_COMPLETE = "tutorial_complete"
+    const val LEVEL_UP          = "level_up"
+
+    // Event tokens — copy-paste from your Adjust dashboard
+    val tokens: Map<String, String> = mapOf(
+        PURCHASE          to "evt001",
+        TUTORIAL_COMPLETE to "evt002",
+        LEVEL_UP          to "evt003"
+    )
+}
+```
+
+Then plug it into the SDK config and use the constants when logging:
+```kotlin
+// Application.onCreate()
+trackingConfig = KiroTracker.Config(
+    adjustAppToken = "YOUR_ADJUST_APP_TOKEN",
+    adjustSandbox = BuildConfig.DEBUG,
+    adjustEventTokens = AdjustEvents.tokens
+)
+
+// Anywhere in your app
+KiroSdk.tracker.logEvent(AdjustEvents.PURCHASE, params)
+```
+
+When you call `logEvent(AdjustEvents.PURCHASE, ...)`, the SDK looks up `"evt001"` and forwards the event to Adjust. Events without a mapping are silently skipped for Adjust (they still go to Firebase / AppsFlyer / Facebook as usual).
+
+Standard `value`/`currency` parameters are automatically forwarded as Adjust revenue:
+```kotlin
+val params = Bundle().apply {
+    putDouble("value", 9.99)
+    putString("currency", "USD")
+}
+KiroSdk.tracker.logEvent(AdjustEvents.PURCHASE, params)   // Adjust setRevenue(9.99, "USD")
+```
+
+> [!NOTE]
+> All other parameters become Adjust callback parameters and appear in the Adjust dashboard against the event.
+
+#### Adjust ad revenue (automatic)
+For paid ad impressions, the SDK additionally calls Adjust's dedicated `Adjust.trackAdRevenue` API on every impression. This is **automatic and requires no event token** — it surfaces in Adjust's "Ad Revenue" dashboard with eCPM / ARPDAU rollups.
+
+The default ad source is `"admob_sdk"`. If you mediate through other networks, override per-call via `KiroSdk.tracker.logAdRevenue(...)`:
+```kotlin
+import com.adjust.sdk.AdjustConfig
+
+KiroSdk.tracker.logAdRevenue(
+    revenueUsd = 0.0023,
+    currency = "USD",
+    adUnitId = "ca-app-pub-...",
+    adFormat = "Banner",
+    adNetworkSource = AdjustConfig.AD_REVENUE_APPLOVIN_MAX  // or another supported source
+)
+```
+
+> [!TIP]
+> Auto ad revenue and the standard `paid_ad_impression*` events run in parallel:
+> - **`Adjust.trackAdRevenue`** — for the Adjust Ad Revenue dashboard (no token).
+> - **`logEvent("paid_ad_impression", ...)`** — for cross-platform reporting (Firebase / AppsFlyer / Facebook / Adjust). Map a token in `adjustEventTokens` if you also want this on Adjust's Events dashboard.
+
+#### What ad-related events are auto-tracked?
+
+The SDK fires these events automatically for every ad load/show/click (Banner, Interstitial, Rewarded, Native, App Open). You do not need to call them manually.
+
+| Event | When | Goes to |
+|---|---|---|
+| `ad_impression` | Every paid impression | Firebase only (Firebase standard) |
+| `paid_ad_impression` | Every paid impression | Firebase + AppsFlyer + Facebook + Adjust* |
+| `paid_ad_impression_value` | Every paid impression | All 4 platforms* |
+| `paid_ad_impression_value_001` | Total revenue ≥ $0.01 | All 4 platforms* |
+| `event_total_revenue_ad_in_3_days` | Day 3 cohort | All 4 platforms* |
+| `event_total_revenue_ad_in_7_days` | Day 7 cohort | All 4 platforms* |
+| `event_user_click_ads` | Every ad click | All 4 platforms* |
+| (ad revenue) | Every paid impression | Adjust **Ad Revenue** dashboard via `trackAdRevenue` (no token needed) |
+
+*For Adjust, only events with a matching entry in `adjustEventTokens` reach the dashboard. Map only the events you care about — the rest are silently skipped.
+
+Recommended minimal mapping for Adjust:
+```kotlin
+object AdjustEvents {
+    const val USER_CLICK_ADS = "event_user_click_ads"
+    const val REVENUE_001    = "paid_ad_impression_value_001"
+
+    val tokens = mapOf(
+        USER_CLICK_ADS to "abc123",   // copy from Adjust dashboard
+        REVENUE_001    to "abc124"
+    )
+}
 ```
 
 ---

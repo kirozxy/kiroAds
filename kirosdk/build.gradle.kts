@@ -66,6 +66,7 @@ dependencies {
     implementation(libs.appsflyer)
     implementation(libs.install.referrer)
     implementation(libs.facebook.core)
+    implementation(libs.adjust.android)
 
     // Billing SDK (Google Play Billing)
     implementation(libs.play.billing)

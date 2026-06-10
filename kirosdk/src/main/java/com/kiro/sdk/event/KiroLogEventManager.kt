@@ -65,7 +65,16 @@ object KiroLogEventManager {
         KiroPreferenceUtils.addTotalRevenue(revenueUsd.toFloat())
         KiroPreferenceUtils.addThresholdRevenue(revenueUsd.toFloat())
 
-        // 5. Check $0.01 threshold event
+        // 5. Forward ad revenue to Adjust's dedicated trackAdRevenue API (no token required).
+        // No-op when adjustAppToken is null.
+        KiroSdk.tracker.logAdRevenue(
+            revenueUsd = revenueUsd,
+            currency = adValue.currencyCode,
+            adUnitId = adUnitId,
+            adFormat = adFormat
+        )
+
+        // 6. Check $0.01 threshold event
         val thresholdRevenue = KiroPreferenceUtils.getThresholdRevenue()
         if (thresholdRevenue >= 0.01f) {
             KiroPreferenceUtils.resetThresholdRevenue()
@@ -75,7 +84,7 @@ object KiroLogEventManager {
             KiroSdk.tracker.logEvent("paid_ad_impression_value_001", thresholdParams)
         }
 
-        // 6. Check cohort events (3-day and 7-day revenue logs)
+        // 7. Check cohort events (3-day and 7-day revenue logs)
         checkAndLogCohortEvents()
     }
 

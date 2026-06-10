@@ -3,6 +3,11 @@ package com.kiro.sdk.tracking
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import com.adjust.sdk.Adjust
+import com.adjust.sdk.AdjustAdRevenue
+import com.adjust.sdk.AdjustConfig
+import com.adjust.sdk.AdjustEvent
+import com.adjust.sdk.LogLevel
 import com.appsflyer.AppsFlyerLib
 import com.facebook.appevents.AppEventsLogger
 import com.google.firebase.analytics.FirebaseAnalytics
@@ -12,7 +17,8 @@ import java.lang.ref.WeakReference
 enum class TrackerPlatform {
     FIREBASE,
     APPSFLYER,
-    FACEBOOK
+    FACEBOOK,
+    ADJUST
 }
 
 class KiroTracker(context: Context, private val config: Config) {
@@ -56,6 +62,23 @@ class KiroTracker(context: Context, private val config: Config) {
                 Log.e("KiroTracker", "Failed to initialize Facebook AppEvents Logger: ${e.message}")
             }
         }
+
+        // Initialize Adjust SDK
+        if (config.adjustAppToken != null) {
+            try {
+                val environment = if (config.adjustSandbox) {
+                    AdjustConfig.ENVIRONMENT_SANDBOX
+                } else {
+                    AdjustConfig.ENVIRONMENT_PRODUCTION
+                }
+                val adjustConfig = AdjustConfig(context.applicationContext, config.adjustAppToken, environment)
+                if (config.adjustSandbox) adjustConfig.setLogLevel(LogLevel.VERBOSE)
+                Adjust.initSdk(adjustConfig)
+                Log.d("KiroTracker", "Adjust initialized successfully (env=$environment).")
+            } catch (e: Exception) {
+                Log.e("KiroTracker", "Failed to initialize Adjust: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -69,7 +92,7 @@ class KiroTracker(context: Context, private val config: Config) {
     fun logEvent(
         eventName: String,
         params: Bundle? = null,
-        platforms: Set<TrackerPlatform> = setOf(TrackerPlatform.FIREBASE, TrackerPlatform.APPSFLYER, TrackerPlatform.FACEBOOK)
+        platforms: Set<TrackerPlatform> = setOf(TrackerPlatform.FIREBASE, TrackerPlatform.APPSFLYER, TrackerPlatform.FACEBOOK, TrackerPlatform.ADJUST)
     ) {
         Log.d("KiroTracker", "Logging event: $eventName to $platforms, Params: ${params?.toString() ?: "empty"}")
 
@@ -180,6 +203,41 @@ class KiroTracker(context: Context, private val config: Config) {
                 Log.e("KiroTracker", "Facebook logEvent failed: ${e.message}")
             }
         }
+
+        // 4. Log to Adjust
+        if (platforms.contains(TrackerPlatform.ADJUST) && config.adjustAppToken != null) {
+            try {
+                val token = config.adjustEventTokens[eventName]
+                if (token == null) {
+                    Log.d("KiroTracker", "Skipping Adjust event '$eventName': no token mapped in adjustEventTokens.")
+                } else {
+                    val adjustEvent = AdjustEvent(token)
+                    val paramsMap = bundleToMap(params) ?: emptyMap()
+
+                    // Forward standard revenue + currency to Adjust's setRevenue API
+                    val rawRevenue = paramsMap["value"] ?: paramsMap["revenue"]
+                    val revenue = when (rawRevenue) {
+                        is Number -> rawRevenue.toDouble()
+                        is String -> rawRevenue.toDoubleOrNull()
+                        else -> null
+                    }
+                    val currency = (paramsMap["currency"] as? String) ?: "USD"
+                    if (revenue != null) {
+                        adjustEvent.setRevenue(revenue, currency)
+                    }
+
+                    // Forward remaining params as Adjust callback parameters (visible in Adjust dashboard)
+                    for ((k, v) in paramsMap) {
+                        if (k == "value" || k == "revenue" || k == "currency") continue
+                        adjustEvent.addCallbackParameter(k, v.toString())
+                    }
+
+                    Adjust.trackEvent(adjustEvent)
+                }
+            } catch (e: Exception) {
+                Log.e("KiroTracker", "Adjust logEvent failed: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -201,6 +259,50 @@ class KiroTracker(context: Context, private val config: Config) {
      */
     fun logFacebookEvent(eventName: String, params: Bundle? = null) {
         logEvent(eventName, params, setOf(TrackerPlatform.FACEBOOK))
+    }
+
+    /**
+     * Logs an event specifically to Adjust. Requires a token mapped via [Config.adjustEventTokens].
+     */
+    fun logAdjustEvent(eventName: String, params: Bundle? = null) {
+        logEvent(eventName, params, setOf(TrackerPlatform.ADJUST))
+    }
+
+    /**
+     * Forwards ad revenue to Adjust via its dedicated `Adjust.trackAdRevenue` API. This is more
+     * idiomatic than `trackEvent` for ad revenue: it lands in Adjust's "Ad Revenue" dashboard with
+     * automatic eCPM/ARPDAU rollups, and **does not require an event token**.
+     *
+     * Called automatically by `KiroLogEventManager.logPaidAdImpression` for every paid impression
+     * (Banner / Interstitial / Rewarded / Native / App Open). You normally do not need to call
+     * this yourself.
+     *
+     * @param revenueUsd Revenue value in the supplied [currency].
+     * @param currency ISO 4217 currency code, e.g. "USD".
+     * @param adUnitId AdMob ad unit ID (or other network's unit identifier).
+     * @param adFormat Ad format string used as Adjust placement (e.g. "Banner", "Interstitial").
+     * @param adNetworkSource Adjust ad source identifier. Defaults to `"admob_sdk"`.
+     *   For other networks, pass the matching `AdjustConfig.AD_REVENUE_*` constant or its raw
+     *   string value (e.g. `"applovin_max_sdk"`, `"ironsource_sdk"`, `"unity_sdk"`,
+     *   `"admost_sdk"`, `"adx_sdk"`, or `AdjustConfig.AD_REVENUE_PUBLISHER` for custom).
+     */
+    fun logAdRevenue(
+        revenueUsd: Double,
+        currency: String,
+        adUnitId: String,
+        adFormat: String,
+        adNetworkSource: String = "admob_sdk"
+    ) {
+        if (config.adjustAppToken == null) return
+        try {
+            val adRevenue = AdjustAdRevenue(adNetworkSource)
+            adRevenue.setRevenue(revenueUsd, currency)
+            adRevenue.setAdRevenueUnit(adUnitId)
+            adRevenue.setAdRevenuePlacement(adFormat)
+            Adjust.trackAdRevenue(adRevenue)
+        } catch (e: Exception) {
+            Log.e("KiroTracker", "Adjust trackAdRevenue failed: ${e.message}")
+        }
     }
 
     /**
@@ -231,6 +333,15 @@ class KiroTracker(context: Context, private val config: Config) {
                 AppEventsLogger.setUserID(userId)
             } catch (e: Exception) {
                 Log.e("KiroTracker", "Facebook setUserID failed: ${e.message}")
+            }
+        }
+
+        // Adjust User ID — surfaced to dashboard as a global callback parameter
+        if (config.adjustAppToken != null) {
+            try {
+                Adjust.addGlobalCallbackParameter("user_id", userId)
+            } catch (e: Exception) {
+                Log.e("KiroTracker", "Adjust setUserId failed: ${e.message}")
             }
         }
     }
@@ -279,6 +390,20 @@ class KiroTracker(context: Context, private val config: Config) {
     data class Config(
         val enableFirebase: Boolean = true,
         val appsFlyerDevKey: String? = null,
-        val enableFacebook: Boolean = false
+        val enableFacebook: Boolean = false,
+        /**
+         * Adjust app token (from your Adjust dashboard). When `null`, Adjust is disabled.
+         */
+        val adjustAppToken: String? = null,
+        /**
+         * When `true`, Adjust runs in sandbox/test environment with verbose logging.
+         * Set to `true` for debug builds, `false` for production.
+         */
+        val adjustSandbox: Boolean = false,
+        /**
+         * Maps your event names (used in `logEvent`) to Adjust event tokens (created on the
+         * Adjust dashboard). Events without a mapping are skipped for Adjust silently.
+         */
+        val adjustEventTokens: Map<String, String> = emptyMap()
     )
 }
