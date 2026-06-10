@@ -7,6 +7,18 @@
 
 ---
 
+## Requirements
+
+- **Android Studio** Flamingo (2022.2.1) or newer — ships with the required JDK 17
+- **Android Gradle Plugin** 8.0+
+- **Kotlin** 1.9+
+- **minSdk** 21 (Android 5.0 Lollipop) or higher
+
+> [!NOTE]
+> Your app code can still target Java 8 / 11 / 17 in `compileOptions` — the requirements above only apply to your build tooling, not your app's source compatibility.
+
+---
+
 ## Getting Started
 
 Follow these steps to integrate the library using JitPack:
