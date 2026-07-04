@@ -42,7 +42,7 @@ Add the dependency to your app-level `build.gradle.kts` file:
 
 ```kotlin
 dependencies {
-    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.3")
+    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.4")
 }
 ```
 
@@ -481,6 +481,20 @@ KiroSdk.ads.loadAndShowInterstitial2F(
 )
 ```
 
+##### Option D: Auto Load and Show (Single Ad Unit ID)
+Loads a single Interstitial Ad Unit ID (checking the pool first, skipping the loading dialog if cached) and shows it automatically:
+```kotlin
+KiroSdk.ads.loadAndShowInterstitial(
+    activity = this,
+    adUnitId = "ca-app-pub-3940256099942544/1033173712", // Google's test interstitial ID
+    onAdDismissed = {
+        // Proceed to the next screen or action
+        val intent = Intent(this, NextActivity::class.java)
+        startActivity(intent)
+    }
+)
+```
+
 ###### Customizing the Loading Dialog
 Both `loadAndShowInterstitial2F` and `loadAndShowRewarded2F` accept an optional `KiroLoadingDialogConfig` so you can match your app's theme. There are three levels of customization, in order of priority:
 
@@ -578,8 +592,23 @@ KiroSdk.ads.loadAndShowRewarded2F(
 )
 ```
 
+##### Auto Load and Show (Single Ad Unit ID)
+Loads a single Rewarded Ad Unit ID (checking the pool first, skipping the loading dialog if cached) and shows it automatically:
+```kotlin
+KiroSdk.ads.loadAndShowRewarded(
+    activity = this,
+    adUnitId = "ca-app-pub-3940256099942544/5224354917", // Google's test rewarded ID
+    onUserEarnedReward = { amount, type ->
+        // Grant user reward
+    },
+    onAdDismissed = {
+        // Called when the ad is dismissed, or immediately if load fails.
+    }
+)
+```
+
 > [!NOTE]
-> `loadAndShowRewarded2F` accepts the same `loadingConfig: KiroLoadingDialogConfig` parameter as the interstitial variant. See *Customizing the Loading Dialog* above.
+> `loadAndShowRewarded` and `loadAndShowRewarded2F` accept the same `loadingConfig: KiroLoadingDialogConfig` parameter as the interstitial variant. See *Customizing the Loading Dialog* above.
 
 #### Using Native Ads
 

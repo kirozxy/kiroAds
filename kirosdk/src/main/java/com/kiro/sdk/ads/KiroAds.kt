@@ -333,6 +333,56 @@ class KiroAds(val config: Config) {
         }
     }
 
+    /**
+     * Loads an Interstitial ad and shows it automatically upon successful load.
+     * Checks the pool first; if a cached ad is available, displays it instantly (0ms delay).
+     * Displays a blocking progress dialog during loading.
+     * Proceeds immediately calling onAdDismissed if loading fails.
+     */
+    fun loadAndShowInterstitial(
+        activity: Activity,
+        adUnitId: String,
+        loadingConfig: KiroLoadingDialogConfig = KiroLoadingDialogConfig(),
+        onAdDismissed: () -> Unit
+    ) {
+        if (!activity.isActivityAlive()) {
+            onAdDismissed()
+            return
+        }
+
+        // Check if an ad is already available in the pool.
+        if (KiroAdPool.hasAd(AdType.INTERSTITIAL, adUnitId) || KiroAdPool.hasAdOfAnyId(AdType.INTERSTITIAL)) {
+            Log.d("KiroAds", "Ad pool has cached Interstitial. Showing instantly.")
+            showInterstitial(activity, adUnitId, onAdDismissed)
+            return
+        }
+
+        // Show preparing ad loading dialog locally
+        val dialog = createLoadingDialog(activity, loadingConfig)
+        dialog.show()
+
+        val scope = activity.getLifecycleScope()
+        scope.launch {
+            val loaded = loadInterstitial(activity, adUnitId)
+
+            // Dismiss dialog safely on main thread
+            activity.runOnUiThread {
+                if (activity.isActivityAlive()) {
+                    dialog.dismiss()
+                }
+            }
+
+            if (activity.isActivityAlive()) {
+                if (loaded) {
+                    showInterstitial(activity, adUnitId, onAdDismissed)
+                } else {
+                    Log.e("KiroAds", "Interstitial failed to load. Skipping ad.")
+                    onAdDismissed()
+                }
+            }
+        }
+    }
+
     suspend fun loadRewarded(context: Context, adUnitId: String): Boolean {
         if (KiroSdk.isAdsDisabled || !KiroConsentManager.canRequestAds(context)) {
             Log.d("KiroAds", "Ads are disabled or UMP Consent is not gathered. Skipping loadRewarded.")
@@ -515,6 +565,55 @@ class KiroAds(val config: Config) {
                     showRewarded2F(activity, highAdUnitId, lowAdUnitId, onUserEarnedReward, onAdDismissed)
                 } else {
                     Log.e("KiroAds", "Both Rewarded floors failed to load. Skipping ad.")
+                    onAdDismissed()
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads a Rewarded ad and shows it automatically upon successful load.
+     * Checks the pool first; if a cached ad is available, displays it instantly (0ms delay).
+     * Displays a blocking progress dialog during loading.
+     * Proceeds immediately calling onAdDismissed if loading fails.
+     */
+    fun loadAndShowRewarded(
+        activity: Activity,
+        adUnitId: String,
+        onUserEarnedReward: (amount: Int, type: String) -> Unit,
+        loadingConfig: KiroLoadingDialogConfig = KiroLoadingDialogConfig(),
+        onAdDismissed: () -> Unit
+    ) {
+        if (!activity.isActivityAlive()) {
+            onAdDismissed()
+            return
+        }
+
+        // Check if an ad is already available in the pool.
+        if (KiroAdPool.hasAd(AdType.REWARDED, adUnitId) || KiroAdPool.hasAdOfAnyId(AdType.REWARDED)) {
+            Log.d("KiroAds", "Ad pool has cached Rewarded. Showing instantly.")
+            showRewarded(activity, adUnitId, onUserEarnedReward, onAdDismissed)
+            return
+        }
+
+        val dialog = createLoadingDialog(activity, loadingConfig)
+        dialog.show()
+
+        val scope = activity.getLifecycleScope()
+        scope.launch {
+            val loaded = loadRewarded(activity, adUnitId)
+
+            activity.runOnUiThread {
+                if (activity.isActivityAlive()) {
+                    dialog.dismiss()
+                }
+            }
+
+            if (activity.isActivityAlive()) {
+                if (loaded) {
+                    showRewarded(activity, adUnitId, onUserEarnedReward, onAdDismissed)
+                } else {
+                    Log.e("KiroAds", "Rewarded failed to load. Skipping ad.")
                     onAdDismissed()
                 }
             }
