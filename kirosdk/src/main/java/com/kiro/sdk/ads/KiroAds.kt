@@ -36,17 +36,7 @@ class KiroAds(val config: Config) {
      */
     val appOpen: KiroAppOpenAdManager = KiroAppOpenAdManager()
 
-    private val loadedAppOpenAds = java.util.Collections.synchronizedMap(
-        java.util.HashMap<String, com.google.android.gms.ads.appopen.AppOpenAd>()
-    )
 
-    private val loadedInterstitialAds = java.util.Collections.synchronizedMap(
-        java.util.HashMap<String, InterstitialAd>()
-    )
-
-    private val loadedRewardedAds = java.util.Collections.synchronizedMap(
-        java.util.HashMap<String, RewardedAd>()
-    )
 
     private val activeNativeAdViews = java.util.Collections.synchronizedSet(
         java.util.Collections.newSetFromMap(java.util.WeakHashMap<KiroNativeAdView, Boolean>())
@@ -95,6 +85,7 @@ class KiroAds(val config: Config) {
      * Hides and destroys all active ads immediately (e.g. when removing ads on purchase).
      */
     fun hideAllActiveAds() {
+        KiroAdPool.clearAll()
         synchronized(activeNativeAdViews) {
             for (view in activeNativeAdViews) {
                 view.visibility = android.view.View.GONE
@@ -160,10 +151,6 @@ class KiroAds(val config: Config) {
         }
     }
 
-    /**
-     * Loads an Interstitial Ad asynchronously.
-     * Returns true if loaded successfully, false otherwise.
-     */
     suspend fun loadInterstitial(context: Context, adUnitId: String): Boolean {
         if (KiroSdk.isAdsDisabled || !KiroConsentManager.canRequestAds(context)) {
             Log.d("KiroAds", "Ads are disabled or UMP Consent is not gathered. Skipping loadInterstitial.")
@@ -173,7 +160,6 @@ class KiroAds(val config: Config) {
             val adRequest = AdRequest.Builder().build()
             InterstitialAd.load(context, adUnitId, adRequest, object : InterstitialAdLoadCallback() {
                 override fun onAdFailedToLoad(adError: LoadAdError) {
-                    loadedInterstitialAds.remove(adUnitId)
                     Log.e("KiroAds", "Error loading Interstitial: ${adError.message}")
                     if (continuation.isActive) {
                         continuation.resume(false)
@@ -181,7 +167,7 @@ class KiroAds(val config: Config) {
                 }
 
                 override fun onAdLoaded(interstitialAd: InterstitialAd) {
-                    loadedInterstitialAds[adUnitId] = interstitialAd
+                    KiroAdPool.putAd(AdType.INTERSTITIAL, adUnitId, interstitialAd)
                     
                     // Automatically attach ad revenue tracking listener
                     interstitialAd.setOnPaidEventListener { adValue ->
@@ -225,7 +211,7 @@ class KiroAds(val config: Config) {
             onAdDismissed?.invoke()
             return
         }
-        val ad = loadedInterstitialAds.remove(adUnitId)
+        val ad = KiroAdPool.getAd(AdType.INTERSTITIAL, adUnitId) as? InterstitialAd
         if (ad != null) {
             ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
                 override fun onAdClicked() {
@@ -250,16 +236,55 @@ class KiroAds(val config: Config) {
     }
 
     /**
+     * Shows an already-retrieved Interstitial Ad directly. Used by the 2-floor waterfall
+     * fallback path where the ad was obtained via [KiroAdPool.getAnyAd] rather than by ID.
+     */
+    private fun showInterstitialDirect(activity: Activity, ad: InterstitialAd, onAdDismissed: (() -> Unit)? = null) {
+        if (KiroSdk.isAdsDisabled || activity.isActivityInPiP()) {
+            Log.d("KiroAds", "Ads are disabled or activity is in PiP mode. Skipping showInterstitial.")
+            onAdDismissed?.invoke()
+            return
+        }
+        if (!canShowFullScreenAd()) {
+            Log.d("KiroAds", "Interstitial blocked by full-screen ad cooldown.")
+            onAdDismissed?.invoke()
+            return
+        }
+        ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
+            override fun onAdClicked() {
+                KiroLogEventManager.logClickAdsEvent(ad.adUnitId)
+            }
+
+            override fun onAdDismissedFullScreenContent() {
+                onAdDismissed?.invoke()
+            }
+
+            override fun onAdFailedToShowFullScreenContent(adError: com.google.android.gms.ads.AdError) {
+                onAdDismissed?.invoke()
+            }
+        }
+        ad.show(activity)
+        markFullScreenAdShown()
+    }
+
+    /**
      * Shows the Interstitial Ad from a 2-floor waterfall by checking either the high or low floor cache.
      */
     fun showInterstitial2F(activity: Activity, highAdUnitId: String, lowAdUnitId: String, onAdDismissed: (() -> Unit)? = null) {
-        if (loadedInterstitialAds.containsKey(highAdUnitId)) {
+        if (KiroAdPool.hasAd(AdType.INTERSTITIAL, highAdUnitId)) {
             showInterstitial(activity, highAdUnitId, onAdDismissed)
-        } else if (loadedInterstitialAds.containsKey(lowAdUnitId)) {
+        } else if (KiroAdPool.hasAd(AdType.INTERSTITIAL, lowAdUnitId)) {
             showInterstitial(activity, lowAdUnitId, onAdDismissed)
         } else {
-            Log.w("KiroAds", "Neither high floor ($highAdUnitId) nor low floor ($lowAdUnitId) Interstitial Ad is ready yet.")
-            onAdDismissed?.invoke()
+            // Fallback: explicitly retrieve any available interstitial from the pool
+            // regardless of its ad unit ID (e.g. leftover from a previous waterfall load).
+            val fallbackAd = KiroAdPool.getAnyAd(AdType.INTERSTITIAL) as? InterstitialAd
+            if (fallbackAd != null) {
+                showInterstitialDirect(activity, fallbackAd, onAdDismissed)
+            } else {
+                Log.w("KiroAds", "Neither high floor ($highAdUnitId) nor low floor ($lowAdUnitId) nor any generic Interstitial Ad is ready yet.")
+                onAdDismissed?.invoke()
+            }
         }
     }
 
@@ -308,10 +333,6 @@ class KiroAds(val config: Config) {
         }
     }
 
-    /**
-     * Loads a Rewarded Ad asynchronously.
-     * Returns true if loaded successfully, false otherwise.
-     */
     suspend fun loadRewarded(context: Context, adUnitId: String): Boolean {
         if (KiroSdk.isAdsDisabled || !KiroConsentManager.canRequestAds(context)) {
             Log.d("KiroAds", "Ads are disabled or UMP Consent is not gathered. Skipping loadRewarded.")
@@ -321,7 +342,6 @@ class KiroAds(val config: Config) {
             val adRequest = AdRequest.Builder().build()
             RewardedAd.load(context, adUnitId, adRequest, object : RewardedAdLoadCallback() {
                 override fun onAdFailedToLoad(adError: LoadAdError) {
-                    loadedRewardedAds.remove(adUnitId)
                     Log.e("KiroAds", "Error loading Rewarded: ${adError.message}")
                     if (continuation.isActive) {
                         continuation.resume(false)
@@ -329,7 +349,7 @@ class KiroAds(val config: Config) {
                 }
 
                 override fun onAdLoaded(rewardedAd: RewardedAd) {
-                    loadedRewardedAds[adUnitId] = rewardedAd
+                    KiroAdPool.putAd(AdType.REWARDED, adUnitId, rewardedAd)
                     
                     // Automatically attach ad revenue tracking listener
                     rewardedAd.setOnPaidEventListener { adValue ->
@@ -359,7 +379,7 @@ class KiroAds(val config: Config) {
             onAdDismissed?.invoke()
             return
         }
-        val ad = loadedRewardedAds.remove(adUnitId)
+        val ad = KiroAdPool.getAd(AdType.REWARDED, adUnitId) as? RewardedAd
         if (ad != null) {
             ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
                 override fun onAdClicked() {
@@ -381,6 +401,39 @@ class KiroAds(val config: Config) {
         } else {
             Log.w("KiroAds", "Rewarded Ad is not ready yet.")
             onAdDismissed?.invoke()
+        }
+    }
+
+    /**
+     * Shows an already-retrieved Rewarded Ad directly. Used by the 2-floor waterfall
+     * fallback path where the ad was obtained via [KiroAdPool.getAnyAd] rather than by ID.
+     */
+    private fun showRewardedDirect(
+        activity: Activity,
+        ad: RewardedAd,
+        onUserEarnedReward: (amount: Int, type: String) -> Unit,
+        onAdDismissed: (() -> Unit)? = null
+    ) {
+        if (KiroSdk.isAdsDisabled || activity.isActivityInPiP()) {
+            Log.d("KiroAds", "Ads are disabled or activity is in PiP mode. Skipping showRewarded.")
+            onAdDismissed?.invoke()
+            return
+        }
+        ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
+            override fun onAdClicked() {
+                KiroLogEventManager.logClickAdsEvent(ad.adUnitId)
+            }
+
+            override fun onAdDismissedFullScreenContent() {
+                onAdDismissed?.invoke()
+            }
+
+            override fun onAdFailedToShowFullScreenContent(adError: com.google.android.gms.ads.AdError) {
+                onAdDismissed?.invoke()
+            }
+        }
+        ad.show(activity) { rewardItem ->
+            onUserEarnedReward(rewardItem.amount, rewardItem.type)
         }
     }
 
@@ -408,13 +461,20 @@ class KiroAds(val config: Config) {
         onUserEarnedReward: (amount: Int, type: String) -> Unit,
         onAdDismissed: (() -> Unit)? = null
     ) {
-        if (loadedRewardedAds.containsKey(highAdUnitId)) {
+        if (KiroAdPool.hasAd(AdType.REWARDED, highAdUnitId)) {
             showRewarded(activity, highAdUnitId, onUserEarnedReward, onAdDismissed)
-        } else if (loadedRewardedAds.containsKey(lowAdUnitId)) {
+        } else if (KiroAdPool.hasAd(AdType.REWARDED, lowAdUnitId)) {
             showRewarded(activity, lowAdUnitId, onUserEarnedReward, onAdDismissed)
         } else {
-            Log.w("KiroAds", "Neither high floor ($highAdUnitId) nor low floor ($lowAdUnitId) Rewarded Ad is ready yet.")
-            onAdDismissed?.invoke()
+            // Fallback: explicitly retrieve any available rewarded ad from the pool
+            // regardless of its ad unit ID (e.g. leftover from a previous waterfall load).
+            val fallbackAd = KiroAdPool.getAnyAd(AdType.REWARDED) as? RewardedAd
+            if (fallbackAd != null) {
+                showRewardedDirect(activity, fallbackAd, onUserEarnedReward, onAdDismissed)
+            } else {
+                Log.w("KiroAds", "Neither high floor ($highAdUnitId) nor low floor ($lowAdUnitId) nor any generic Rewarded Ad is ready yet.")
+                onAdDismissed?.invoke()
+            }
         }
     }
 
@@ -461,10 +521,6 @@ class KiroAds(val config: Config) {
         }
     }
 
-    /**
-     * Loads an App Open Ad asynchronously. For manual control. If you prefer auto show-on-foreground,
-     * use [appOpen] (KiroAppOpenAdManager) instead.
-     */
     suspend fun loadAppOpen(
         context: Context,
         adUnitId: String
@@ -478,7 +534,7 @@ class KiroAds(val config: Config) {
                 context, adUnitId, AdRequest.Builder().build(),
                 object : com.google.android.gms.ads.appopen.AppOpenAd.AppOpenAdLoadCallback() {
                     override fun onAdLoaded(ad: com.google.android.gms.ads.appopen.AppOpenAd) {
-                        loadedAppOpenAds[adUnitId] = ad
+                        KiroAdPool.putAd(AdType.APP_OPEN, adUnitId, ad)
                         ad.setOnPaidEventListener { adValue ->
                             KiroLogEventManager.logPaidAdImpression(context, adValue, adUnitId, "AppOpen")
                         }
@@ -486,7 +542,6 @@ class KiroAds(val config: Config) {
                     }
 
                     override fun onAdFailedToLoad(error: LoadAdError) {
-                        loadedAppOpenAds.remove(adUnitId)
                         Log.e("KiroAds", "Error loading App Open: ${error.message}")
                         if (continuation.isActive) continuation.resume(false)
                     }
@@ -508,7 +563,7 @@ class KiroAds(val config: Config) {
             onAdDismissed?.invoke()
             return
         }
-        val ad = loadedAppOpenAds.remove(adUnitId)
+        val ad = KiroAdPool.getAd(AdType.APP_OPEN, adUnitId) as? com.google.android.gms.ads.appopen.AppOpenAd
         if (ad == null) {
             Log.w("KiroAds", "App Open Ad is not ready yet.")
             onAdDismissed?.invoke()
@@ -576,8 +631,21 @@ class KiroAds(val config: Config) {
 
     /**
      * Loads and attaches a Banner Ad directly into a Container View.
+     * Supports collapsible banners by providing [collapsibleType].
+     *
+     * @param activity Android Activity.
+     * @param container Container View to attach the ad to.
+     * @param adUnitId AdMob Ad Unit ID.
+     * @param adSize Ad size (defaults to BANNER).
+     * @param collapsibleType Collapsible position: "top", "bottom", or null (standard adaptive banner).
      */
-    fun showBanner(activity: Activity, container: ViewGroup, adUnitId: String, adSize: AdSize = AdSize.BANNER) {
+    fun showBanner(
+        activity: Activity,
+        container: ViewGroup,
+        adUnitId: String,
+        adSize: AdSize = AdSize.BANNER,
+        collapsibleType: String? = null
+    ) {
         synchronized(activeBannerContainers) {
             activeBannerContainers[container] = false
         }
@@ -637,12 +705,21 @@ class KiroAds(val config: Config) {
         
         container.addView(adView)
         
-        val adRequest = AdRequest.Builder().build()
+        val adRequest = if (collapsibleType != null) {
+            val extras = android.os.Bundle().apply {
+                putString("collapsible", collapsibleType)
+            }
+            AdRequest.Builder()
+                .addNetworkExtrasBundle(com.google.ads.mediation.admob.AdMobAdapter::class.java, extras)
+                .build()
+        } else {
+            AdRequest.Builder().build()
+        }
         adView.loadAd(adRequest)
     }
 
     /**
-     * Loads a Native Ad asynchronously.
+     * Loads a Native Ad asynchronously. Checks the pool first.
      * Returns the NativeAd object if successful, null otherwise.
      */
     suspend fun loadNativeAd(context: Context, adUnitId: String): NativeAd? {
@@ -650,6 +727,14 @@ class KiroAds(val config: Config) {
             Log.d("KiroAds", "Ads are disabled or UMP Consent is not gathered. Skipping loadNativeAd.")
             return null
         }
+        
+        // Check pool first.
+        val cachedAd = KiroAdPool.getAd(AdType.NATIVE, adUnitId) as? NativeAd
+        if (cachedAd != null) {
+            Log.d("KiroAds", "Returning cached Native Ad from pool.")
+            return cachedAd
+        }
+
         return suspendCancellableCoroutine { continuation ->
             val adLoader = AdLoader.Builder(context, adUnitId)
                 .forNativeAd { nativeAd ->
@@ -660,6 +745,10 @@ class KiroAds(val config: Config) {
                     
                     if (continuation.isActive) {
                         continuation.resume(nativeAd)
+                    } else {
+                        // If the load finishes after the coroutine was cancelled (e.g. timeout),
+                        // store the ad into the pool for future reuse.
+                        KiroAdPool.putAd(AdType.NATIVE, adUnitId, nativeAd)
                     }
                 }
                 .withAdListener(object : com.google.android.gms.ads.AdListener() {
@@ -676,8 +765,59 @@ class KiroAds(val config: Config) {
                     }
                 })
                 .build()
-
+ 
             adLoader.loadAd(AdRequest.Builder().build())
+        }
+    }
+
+    /**
+     * Preloads a Native Ad and stores it in the pool.
+     */
+    fun preloadNativeAd(context: Context, adUnitId: String, onLoaded: ((success: Boolean) -> Unit)? = null) {
+        if (KiroSdk.isAdsDisabled || !KiroConsentManager.canRequestAds(context)) {
+            onLoaded?.invoke(false)
+            return
+        }
+        
+        // Already preloaded.
+        if (KiroAdPool.hasAd(AdType.NATIVE, adUnitId)) {
+            onLoaded?.invoke(true)
+            return
+        }
+
+        val adLoader = AdLoader.Builder(context, adUnitId)
+            .forNativeAd { nativeAd ->
+                nativeAd.setOnPaidEventListener { adValue ->
+                    KiroLogEventManager.logPaidAdImpression(context, adValue, adUnitId, "Native")
+                }
+                KiroAdPool.putAd(AdType.NATIVE, adUnitId, nativeAd)
+                onLoaded?.invoke(true)
+            }
+            .withAdListener(object : com.google.android.gms.ads.AdListener() {
+                override fun onAdClicked() {
+                    KiroLogEventManager.logClickAdsEvent(adUnitId)
+                }
+                override fun onAdFailedToLoad(error: LoadAdError) {
+                    Log.e("KiroAds", "Error preloading Native Ad: ${error.message}")
+                    onLoaded?.invoke(false)
+                }
+            })
+            .build()
+        adLoader.loadAd(AdRequest.Builder().build())
+    }
+
+    /**
+     * Preloads a Native Ad with a 2-floor priority waterfall.
+     */
+    fun preloadNativeAd2F(context: Context, highAdUnitId: String, lowAdUnitId: String, onComplete: ((success: Boolean) -> Unit)? = null) {
+        preloadNativeAd(context, highAdUnitId) { success ->
+            if (success) {
+                onComplete?.invoke(true)
+            } else {
+                preloadNativeAd(context, lowAdUnitId) { lowSuccess ->
+                    onComplete?.invoke(lowSuccess)
+                }
+            }
         }
     }
 
@@ -721,6 +861,8 @@ class KiroAds(val config: Config) {
         scope.launch {
             val nativeAd = loadNativeAd(context, adUnitId)
             val activity = container.context.findActivity()
+            // activity == null → container is hosted by a non-Activity context (e.g. Application);
+            // proceed normally since there is no lifecycle to check.
             if (activity == null || activity.isActivityAlive()) {
                 if (nativeAd != null) {
                     val adView = inflateDefaultNativeAdView(context)
@@ -745,6 +887,9 @@ class KiroAds(val config: Config) {
                 } else {
                     onComplete?.invoke(false)
                 }
+            } else {
+                // Activity was destroyed while the ad was loading — notify the caller.
+                onComplete?.invoke(false)
             }
         }
     }
@@ -777,6 +922,8 @@ class KiroAds(val config: Config) {
         scope.launch {
             val nativeAd = loadNativeAd2F(context, highAdUnitId, lowAdUnitId)
             val activity = container.context.findActivity()
+            // activity == null → container is hosted by a non-Activity context (e.g. Application);
+            // proceed normally since there is no lifecycle to check.
             if (activity == null || activity.isActivityAlive()) {
                 if (nativeAd != null) {
                     val adView = inflateDefaultNativeAdView(context)
@@ -801,6 +948,9 @@ class KiroAds(val config: Config) {
                 } else {
                     onComplete?.invoke(false)
                 }
+            } else {
+                // Activity was destroyed while the ad was loading — notify the caller.
+                onComplete?.invoke(false)
             }
         }
     }

@@ -42,8 +42,6 @@ class KiroAppOpenAdManager : Application.ActivityLifecycleCallbacks, DefaultLife
     private val blockedActivities: MutableSet<Class<out Activity>> =
         java.util.Collections.synchronizedSet(mutableSetOf())
 
-    private var appOpenAd: AppOpenAd? = null
-    private var loadTime: Long = 0L
     private var isLoadingAd: Boolean = false
     private var isShowingAd: Boolean = false
     private var isFirstLaunch: Boolean = true
@@ -94,7 +92,6 @@ class KiroAppOpenAdManager : Application.ActivityLifecycleCallbacks, DefaultLife
         if (!isInitialized) return
         application?.unregisterActivityLifecycleCallbacks(this)
         ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
-        appOpenAd = null
         currentActivity = null
         isInitialized = false
     }
@@ -106,10 +103,8 @@ class KiroAppOpenAdManager : Application.ActivityLifecycleCallbacks, DefaultLife
 
     /** True if a non-expired App Open ad is currently cached and ready to show. */
     fun isAdAvailable(): Boolean {
-        if (appOpenAd == null) return false
-        // Per Google guidance, App Open ads expire after 4 hours.
-        val fourHoursMs = 4L * 60L * 60L * 1000L
-        return (System.currentTimeMillis() - loadTime) < fourHoursMs
+        val unitId = adUnitId ?: return false
+        return KiroAdPool.hasAd(AdType.APP_OPEN, unitId)
     }
 
     private fun loadAd() {
@@ -125,8 +120,7 @@ class KiroAppOpenAdManager : Application.ActivityLifecycleCallbacks, DefaultLife
             app, unitId, AdRequest.Builder().build(),
             object : AppOpenAd.AppOpenAdLoadCallback() {
                 override fun onAdLoaded(ad: AppOpenAd) {
-                    appOpenAd = ad
-                    loadTime = System.currentTimeMillis()
+                    KiroAdPool.putAd(AdType.APP_OPEN, unitId, ad)
                     isLoadingAd = false
                     ad.setOnPaidEventListener { adValue ->
                         KiroLogEventManager.logPaidAdImpression(app, adValue, unitId, "AppOpen")
@@ -143,6 +137,10 @@ class KiroAppOpenAdManager : Application.ActivityLifecycleCallbacks, DefaultLife
     }
 
     private fun showAdIfAvailable(activity: Activity, onDismissed: (() -> Unit)? = null) {
+        val unitId = adUnitId ?: run {
+            onDismissed?.invoke()
+            return
+        }
         if (isShowingAd) {
             onDismissed?.invoke()
             return
@@ -171,24 +169,22 @@ class KiroAppOpenAdManager : Application.ActivityLifecycleCallbacks, DefaultLife
             onDismissed?.invoke()
             return
         }
-        val ad = appOpenAd ?: run {
+        val ad = KiroAdPool.getAd(AdType.APP_OPEN, unitId) as? AppOpenAd ?: run {
             onDismissed?.invoke()
             return
         }
         ad.fullScreenContentCallback = object : FullScreenContentCallback() {
             override fun onAdClicked() {
-                adUnitId?.let { KiroLogEventManager.logClickAdsEvent(it) }
+                KiroLogEventManager.logClickAdsEvent(unitId)
             }
 
             override fun onAdDismissedFullScreenContent() {
-                appOpenAd = null
                 isShowingAd = false
                 onDismissed?.invoke()
                 loadAd()
             }
 
             override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                appOpenAd = null
                 isShowingAd = false
                 onDismissed?.invoke()
                 loadAd()

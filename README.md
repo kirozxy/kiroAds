@@ -42,7 +42,7 @@ Add the dependency to your app-level `build.gradle.kts` file:
 
 ```kotlin
 dependencies {
-    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.2")
+    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.3")
 }
 ```
 
@@ -336,7 +336,18 @@ val current = KiroSdk.ads.getFullScreenAdCooldownMs()
 ```
 
 > [!TIP]
-> Use `resetFullScreenAdCooldown()` right after a paid Remove Ads upgrade is reverted (debug only) or to bypass cooldown for a special promotional moment. Avoid calling it routinely or it defeats the purpose.
+#### Built-in Ad Pool (Ad Cache)
+
+To maximize fill rates, eliminate ad load delays, and avoid intrusive "jump-scare" ads when users transition screens rapidly, the SDK features a **built-in, thread-safe Ad Pool (`KiroAdPool`)** under the hood.
+
+##### How it works:
+1. **Unified Storage**: Preloaded ads (`AppOpenAd`, `InterstitialAd`, `RewardedAd`, `NativeAd`) are automatically saved to the central pool.
+2. **Intelligent Fallbacks**: When displaying an ad, the pool checks for an exact Ad Unit ID match first. If none is found, it automatically retrieves the oldest non-expired ad of the same type (FIFO fallback).
+3. **Expiration Handling**: Ads in the pool expire after **4 hours** (as per Google AdMob policies) and are pruned automatically to keep the cache clean and policy-compliant.
+4. **Lifecycle Protection**: If a "load-and-show" command finishes loading after the requesting screen has already been destroyed, the SDK automatically diverts the ad to the pool instead of force-showing it, preventing bad UX.
+5. **Auto-Cleanup**: Calling `hideAllActiveAds()` (e.g. after a premium remove-ads purchase) automatically clears the entire pool.
+
+---
 
 #### Displaying a Banner Ad
 
@@ -377,6 +388,29 @@ fun MyScreen() {
     }
 }
 ```
+
+##### Collapsible Banners
+Both `showBanner` and `KiroBannerAd` accept an optional `collapsibleType: String? = null` parameter (supported values: `"top"`, `"bottom"`, or `null`). Collapsible banners load in an expanded overlay on initial load with a native close/collapse button, coiling back to standard banner sizing on user dismiss.
+
+- **View-based Example:**
+  ```kotlin
+  KiroSdk.ads.showBanner(
+      activity = this,
+      container = adContainer,
+      adUnitId = "ca-app-pub-3940256099942544/2014213617", // Google's test collapsible banner ID
+      adSize = AdSize.BANNER,
+      collapsibleType = "bottom" // Configures collapsible anchor position
+  )
+  ```
+
+- **Compose Example:**
+  ```kotlin
+  KiroBannerAd(
+      adUnitId = "ca-app-pub-3940256099942544/2014213617",
+      adSize = AdSize.BANNER,
+      collapsibleType = "bottom"
+  )
+  ```
 
 #### Using Interstitial Ads
 
@@ -601,116 +635,42 @@ nativeAdView.loadAndShowAd("ca-app-pub-3940256099942544/2247696110") { success -
 nativeAdView.loadAndShowAd2F("HIGH_FLOOR_AD_UNIT_ID", "LOW_FLOOR_AD_UNIT_ID")
 ```
 
-###### Option B: Preload Asynchronously and Bind Later (Supports Multi-Screen Flow)
+###### Option B: Preload Asynchronously and Bind Later (Built-in Cache)
 
-If you prefer to load the ad object in the background (e.g., in a splash screen, previous Activity, or a shared `ViewModel`) and display it later in another screen:
+The SDK provides native helper functions to preload Native Ads directly into the `KiroAdPool`. This is the recommended approach for preloading ads on a splash screen or background flow and displaying them later on other screens without writing custom cache templates.
 
 1. **Preload the Ad**:
-```kotlin
-import com.google.android.gms.ads.nativead.NativeAd
-import kotlinx.coroutines.launch
+   On your loading/splash screen (Screen A):
+   ```kotlin
+   // Preload a single native ad into the pool
+   KiroSdk.ads.preloadNativeAd(context = this, adUnitId = "ca-app-pub-3940256099942544/2247696110")
 
-// You can store this in a Singleton, Application class, or a shared ViewModel
-var preloadedNativeAd: NativeAd? = null
+   // Or preload using a 2-floor priority waterfall
+   KiroSdk.ads.preloadNativeAd2F(
+       context = this, 
+       highAdUnitId = "HIGH_FLOOR_AD_UNIT_ID", 
+       lowAdUnitId = "LOW_FLOOR_AD_UNIT_ID"
+   )
+   ```
 
-// Load the ad in your first screen (Screen A)
-lifecycleScope.launch {
-    preloadedNativeAd = KiroSdk.ads.loadNativeAd(context, "ca-app-pub-3940256099942544/2247696110")
-}
-```
+2. **Load and Show Later**:
+   On your destination screen (Screen B), when you call `loadAndShowAd`, the SDK will automatically detect the preloaded ad in the pool and display it instantly (0ms network delay):
+   ```kotlin
+   val nativeAdView = binding.kiroNativeAd
+   nativeAdView.loadAndShowAd("ca-app-pub-3940256099942544/2247696110")
+   ```
 
-2. **Bind the Ad in another screen (Screen B)**:
-```kotlin
-// Retrieve and bind the preloaded ad inside Screen B's Activity/Fragment
-val ad = preloadedNativeAd
-if (ad != null) {
-    val nativeAdView = binding.kiroNativeAd
-    nativeAdView.setNativeAd(ad)
-}
-```
-
-3. **Release Resources (Important)**:
-To avoid memory leaks, always destroy the preloaded ad when the destination screen is destroyed:
-```kotlin
-override fun onDestroy() {
-    preloadedNativeAd?.destroy()
-    preloadedNativeAd = null
-    super.onDestroy()
-}
-```
-
-##### 💡 Best Practice: Preloading Multiple Ads (AdManager Template)
-
-If your application has multiple screens that each preload different Ad Unit IDs, it is highly recommended to use a centralized thread-safe `AdManager` object using a `HashMap` cache structure:
-
-```kotlin
-import android.content.Context
-import com.google.android.gms.ads.nativead.NativeAd
-import com.kiro.sdk.KiroSdk
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-
-object AdManager {
-    // Thread-safe map storing loaded ads mapped by their Ad Unit ID
-    private val preloadedAds = java.util.Collections.synchronizedMap(
-        java.util.HashMap<String, NativeAd>()
-    )
-
-    /**
-     * Start preloading a Native Ad in the background.
-     */
-    fun preloadNativeAd(context: Context, adUnitId: String) {
-        CoroutineScope(Dispatchers.Main).launch {
-            // Prevent duplicate loads if already preloaded
-            if (preloadedAds.containsKey(adUnitId)) return@launch
-
-            val ad = KiroSdk.ads.loadNativeAd(context, adUnitId)
-            if (ad != null) {
-                preloadedAds[adUnitId] = ad
-            }
-        }
-    }
-
-    /**
-     * Consume (retrieve and remove) the preloaded ad for binding.
-     * Google policies forbid displaying the same NativeAd instance on multiple views simultaneously.
-     */
-    fun consumeNativeAd(adUnitId: String): NativeAd? {
-        return preloadedAds.remove(adUnitId)
-    }
-
-    /**
-     * Destroy a specific ad to avoid memory leaks.
-     */
-    fun destroyAd(adUnitId: String) {
-        preloadedAds.remove(adUnitId)?.destroy()
-    }
-
-    /**
-     * Clear all cached ads.
-     */
-    fun destroyAll() {
-        synchronized(preloadedAds) {
-            for (ad in preloadedAds.values) {
-                ad.destroy()
-            }
-            preloadedAds.clear()
-        }
-    }
-}
-```
-
-**Usage:**
-- In `SplashActivity.onCreate`: `AdManager.preloadNativeAd(this, "HOME_AD_UNIT_ID")`
-- In `HomeActivity.onCreate`:
-  ```kotlin
-  val ad = AdManager.consumeNativeAd("HOME_AD_UNIT_ID")
-  if (ad != null) {
-      binding.kiroNativeAd.setNativeAd(ad)
-  }
-  ```
-- In `HomeActivity.onDestroy`: `AdManager.destroyAd("HOME_AD_UNIT_ID")`
+3. **Manual Binding (Optional)**:
+   If you want to manually retrieve the preloaded native ad from the pool:
+   ```kotlin
+   // Retrieves the ad from the pool (or falls back to network load if empty)
+   lifecycleScope.launch {
+       val nativeAd = KiroSdk.ads.loadNativeAd(this@ScreenB, "ca-app-pub-3940256099942544/2247696110")
+       if (nativeAd != null) {
+           binding.kiroNativeAd.setNativeAd(nativeAd)
+       }
+   }
+   ```
 
 ###### Option C: Inside Jetpack Compose
 To display native ads in Compose layouts, use the built-in `KiroNativeAd` composable. You can optionally specify a custom layout XML resource using the `layoutResId` parameter. If not provided, it falls back to the default SDK template layout.
