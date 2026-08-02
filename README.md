@@ -42,7 +42,7 @@ Add the dependency to your app-level `build.gradle.kts` file:
 
 ```kotlin
 dependencies {
-    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.4")
+    implementation("com.github.kirozxy.kiroAds:kirosdk:1.0.5")
 }
 ```
 
