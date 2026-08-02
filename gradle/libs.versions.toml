@@ -4,7 +4,7 @@ kotlin = "1.9.22"
 coreKtx = "1.12.0"
 appcompat = "1.6.1"
 playServicesAds = "23.0.0"
-playBilling = "6.2.1"
+playBilling = "8.0.0"
 firebaseAnalytics = "21.6.1"
 mavenPublish = "0.28.0"
 composeBom = "2024.02.00"
@@ -20,7 +20,7 @@ adjust = "5.0.2"
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 play-services-ads = { group = "com.google.android.gms", name = "play-services-ads", version.ref = "playServicesAds" }
-play-billing = { group = "com.android.billingclient", name = "billing-ktx", version.ref = "playBilling" }
+play-billing = { group = "com.android.billingclient", name = "billing", version.ref = "playBilling" }
 firebase-analytics = { group = "com.google.firebase", name = "firebase-analytics-ktx", version.ref = "firebaseAnalytics" }
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }

@@ -15,7 +15,11 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
 
     private var billingClient: BillingClient = BillingClient.newBuilder(context)
         .setListener(this)
-        .enablePendingPurchases()
+        .enablePendingPurchases(
+            PendingPurchasesParams.newBuilder()
+                .enableOneTimeProducts()
+                .build()
+        )
         .build()
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -94,7 +98,7 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
             .setProductType(BillingClient.ProductType.INAPP)
             .build()
 
-        billingClient.queryPurchasesAsync(inAppParams) { billingResult, purchasesList ->
+        billingClient.queryPurchasesAsync(inAppParams, PurchasesResponseListener { billingResult, purchasesList ->
             if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
                 val hasRemoveAds = purchasesList.any { purchase ->
                     purchase.purchaseState == Purchase.PurchaseState.PURCHASED &&
@@ -105,14 +109,14 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
                     KiroSdk.setAdsDisabled(true)
                 }
             }
-        }
+        })
 
         // 2. Query active subscriptions
         val subsParams = QueryPurchasesParams.newBuilder()
             .setProductType(BillingClient.ProductType.SUBS)
             .build()
 
-        billingClient.queryPurchasesAsync(subsParams) { billingResult, purchasesList ->
+        billingClient.queryPurchasesAsync(subsParams, PurchasesResponseListener { billingResult, purchasesList ->
             if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
                 val hasRemoveAds = purchasesList.any { purchase ->
                     purchase.purchaseState == Purchase.PurchaseState.PURCHASED &&
@@ -123,7 +127,7 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
                     KiroSdk.setAdsDisabled(true)
                 }
             }
-        }
+        })
     }
 
     /**
@@ -149,9 +153,9 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
             .setProductList(productList)
             .build()
 
-        billingClient.queryProductDetailsAsync(params) { billingResult, productDetailsList ->
+        billingClient.queryProductDetailsAsync(params) { billingResult, productDetailsResult ->
             if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-                continuation.resume(productDetailsList)
+                continuation.resume(productDetailsResult.productDetailsList)
             } else {
                 Log.e("KiroBilling", "Failed to query products: ${billingResult.debugMessage}")
                 continuation.resume(null)
@@ -241,14 +245,14 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
             val params = QueryPurchasesParams.newBuilder()
                 .setProductType(BillingClient.ProductType.INAPP)
                 .build()
-            billingClient.queryPurchasesAsync(params) { billingResult, purchasesList ->
+            billingClient.queryPurchasesAsync(params, PurchasesResponseListener { billingResult, purchasesList ->
                 if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
                     continuation.resume(purchasesList)
                 } else {
                     Log.e("KiroBilling", "Failed to query active INAPP purchases: ${billingResult.debugMessage}")
                     continuation.resume(null)
                 }
-            }
+            })
         }
 
         if (inAppResult != null) {
@@ -260,14 +264,14 @@ class KiroBilling(context: Context, val config: Config) : PurchasesUpdatedListen
             val params = QueryPurchasesParams.newBuilder()
                 .setProductType(BillingClient.ProductType.SUBS)
                 .build()
-            billingClient.queryPurchasesAsync(params) { billingResult, purchasesList ->
+            billingClient.queryPurchasesAsync(params, PurchasesResponseListener { billingResult, purchasesList ->
                 if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
                     continuation.resume(purchasesList)
                 } else {
                     Log.e("KiroBilling", "Failed to query active SUBS purchases: ${billingResult.debugMessage}")
                     continuation.resume(null)
                 }
-            }
+            })
         }
 
         if (subsResult != null) {
